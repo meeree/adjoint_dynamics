@@ -64,6 +64,7 @@ def plot_trajectory(ts, traj, name, cmap = mpl.colormaps['cool'], include_cbar =
 
 
 def analyze(z0):
+    global z_cache
     traj = odeint(f, z0, ts).T
     vel = f(traj, ts)
     z_cache = traj
@@ -73,7 +74,7 @@ def analyze(z0):
     aug_traj = odeint(f_aug, aug, ts[::-1]).T
     a_traj = aug_traj[2:, ::-1]
 
-    plt.figure()
+    plt.figure(figsize = (8, 6))
     plt.subplot(2,2,1)
     ax = plot_trajectory(ts, traj, '$z(t)$', include_cbar=False)
     ax.scatter(2.5, 2.5, label = '$z_{\\infty}$', c = 'red', marker = 'x')
