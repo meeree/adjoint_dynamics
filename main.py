@@ -14,9 +14,9 @@ import time
 import pickle
 import glob
 import re, os
-import multi_task
+import memory_pro 
 
-parser = argparse.ArgumentParser('3 Flip Flop Adjoint Demo')
+parser = argparse.ArgumentParser('Single Task Adjoints RNN Example')
 parser.add_argument('--batch_size', type=int, default=100)
 parser.add_argument('--batch_time', type=int, default=400)
 parser.add_argument('--lr', type=float, default=1e-4)
@@ -24,7 +24,6 @@ parser.add_argument('--weight_decay', type=float, default=1e-6)
 parser.add_argument('--grad_clip', type=float, default=1.)
 parser.add_argument('--n_hidden', type=int, default=100)
 parser.add_argument('--niters', type=int, default=50000)
-parser.add_argument('--continuous', type=bool, default=False)
 parser.add_argument('--retrain', type=bool, default=False)
 parser.add_argument('--repca', type=bool, default=False)
 parser.add_argument('--analyze_best', type=bool, default=False)
@@ -33,6 +32,7 @@ device = 'cpu'
 
 class Model(nn.Module):
     ''' The model in this case is just an RNN (hand built). '''
+    ''' I need this hand built RNN for now since it fits into the framework of my adjoint code. '''
     def __init__(self, Win, Wout, bout, W):
         super().__init__()
         self.Win = nn.Parameter(torch.from_numpy(Win).float())
@@ -40,8 +40,6 @@ class Model(nn.Module):
         self.bout = nn.Parameter(torch.from_numpy(bout).float())
         self.W = nn.Parameter(torch.from_numpy(W).float())
         self.X = None
-        self.t = None
-        self.s0 = None
         
     def set_x(self, X): 
         ''' Set the input data, X, to sample from over time. '''
@@ -59,7 +57,7 @@ class Model(nn.Module):
             s = s[None, :] # Not batched. Just add a 1.
         x = self.X[:, int(torch.round(t))-1, :]
         s_new = torch.tanh(torch.mm(s.clone(), self.W) + torch.mm(x, self.Win))
-        return s_new.squeeze()
+        return s_new
 
     def evaluate(self, X, grad_record = False):
         # X is shape [batch size, timesteps, input dim].
@@ -100,16 +98,8 @@ class ModelRNN(nn.Module):
         self.rnn = nn.RNN(self.n_in, self.n_hidden, batch_first = True, bias = False)
 
     def evaluate(self, X):
-        self.X = X.float()
-#        s_init = torch.rand((1, self.n_hidden)) # Random initial conditions
-
         # Pass through RNN over time.
         hidden, s_end = self.rnn(X.float())
-#        hidden = torch.zeros((X.shape[0], X.shape[1], self.n_hidden)).to(X.device)
-#        h = torch.zeros((1, X.shape[0], self.n_hidden)).to(X.device)
-#        for t in range(0, X.shape[1]):
-#            h = .8 * h + .2 * self.rnn(self.X[:, t:t+1], h)[1]
-#            hidden[:, t] = h[0]
 
         # Pass through output layer.
         return self.Wout(hidden), hidden
@@ -126,20 +116,15 @@ def ping_dir(directory, clear = False):
 
     if not os.path.exists(directory):
         os.mkdir(directory)
-        
-def accuracy_laura_task(X, Y):
-    # Answer is correct if it is within pi/10 and fixation matches.
-    cnd1 = torch.sum(torch.abs(X[:, -1, 0] - Y[:, -1, 0]) < 1e-2) # Fixation. UNUSED FOR NOw.
-    cnd2 = (torch.abs(X[:, -1, 1] - Y[:, -1, 1]) < np.pi / 10.) # Stim1
-    cnd3 = (torch.abs(X[:, -1, 2] - Y[:, -1, 2]) < np.pi / 10.) # Stim2
-    return torch.mean(torch.logical_and(cnd2, cnd3).float())
 
-def train(root_dir, debug = False):
+def train(root_dir, plot = True):
     # Load the data and model.
+
+    # Uncomment for deterministic training.
 #    torch.manual_seed(2)
 #    np.random.seed(2)
-#
-    inps, targets = multi_task.generate()
+
+    inps, targets = memory_pro.generate()
     dset = torch.utils.data.TensorDataset(inps, targets)
     dloader = torch.utils.data.DataLoader(dset, batch_size=args.batch_size, shuffle=True)
     model = ModelRNN(args.n_hidden)
@@ -165,7 +150,7 @@ def train(root_dir, debug = False):
 
         # Checkpoint Saving.
         losses.append(loss.item())
-        accs.append(accuracy_laura_task(out, target).item())
+        accs.append(memory_pro.accuracy(out, target).item())
         checkpoint = {
             'losses': losses,
             'accuracies': accs,
@@ -180,35 +165,65 @@ def train(root_dir, debug = False):
         if itr == 0 or (itr+1) % (args.niters // 25) == 0:
             torch.save(checkpoint, root_dir + f'checkpoints/checkpoint_{itr}.pt')
 
+    if plot:
+        plt.figure()
+        plt.subplot(1,2,1)
+        losses_avg = np.convolve(losses, np.ones(20)/20., mode='same')
+        plt.plot(losses)
+        plt.plot(losses_avg)
+        plt.title('Training Loss') 
+        plt.ylabel('Train Loss (mse)')
+        plt.xlabel('Iteration')
+
+        plt.subplot(1,2,2)
+        accs_avg = np.convolve(accs, np.ones(20)/20., mode='same')
+        plt.plot(accs)
+        plt.plot(accs_avg)
+        plt.title('Training Acccuracy') 
+        plt.ylabel('Train Accuracy [0-1]')
+        plt.xlabel('Iteration')
+
+def plot_example_single_trial(checkpoint):
+    X, Y = memory_pro.generate()
+    t = torch.arange(X.shape[1]).float()
+
+    model = torch.load(checkpoint, map_location=torch.device('cpu'))['model']
+    tWout = model['Wout.weight']
+    tbout = model['Wout.bias']
+    tWin = model['rnn.weight_ih_l0']
+    tW = model['rnn.weight_hh_l0']
+    with torch.no_grad():
+        # Transfer pytorch trained model. 
+        Win = tWin.numpy().T 
+        Wout = tWout.numpy().T
+        W = tW.numpy().T
+        bout = tbout.numpy()
+
+        ode = Model(Win, Wout, bout, W)
+        ode.set_x(X)
+        with torch.enable_grad():
+            true_s, out = ode.evaluate(X, grad_record=True)
+            loss_fn = nn.MSELoss()
+            loss = loss_fn(out, Y)
+            grad_s = torch.autograd.grad(loss, true_s)[0]
+
+        # Measure adjoints and state over time and record everything.
+        data = adjoint_calculate_RNN(t, true_s, ode, grad_s)
+
+    # Plot an example.
+    b = 0
     plt.figure()
-    plt.subplot(1,2,1)
-    losses_avg = np.convolve(losses, np.ones(20)/20., mode='same')
-    plt.plot(losses)
-    plt.plot(losses_avg)
-    plt.title('Training Loss') 
-    plt.ylabel('Train Loss (mse)')
-    plt.xlabel('Iteration')
+    for idx, name in enumerate(['Fixation', 'Stimulus Cos', 'Stimulus Sin']):
+        plt.subplot(3, 1, 1 + idx)
+        plt.plot(X[b, :, idx].detach().cpu(), alpha = .5, linewidth = 3, label = 'Input')
+        plt.plot(out[b, :, idx].detach().cpu(), label = 'Output')
+        plt.plot(Y[b, :, idx].detach().cpu(), label = 'Target')
+        plt.title(name, fontsize = 15)
+        plt.ylim(-1.2, 1.2)
 
-    plt.subplot(1,2,2)
-    accs_avg = np.convolve(accs, np.ones(20)/20., mode='same')
-    plt.plot(accs)
-    plt.plot(accs_avg)
-    plt.title('Training Acccuracy') 
-    plt.ylabel('Train Accuracy [0-1]')
-    plt.xlabel('Iteration')
-
-    if debug:
-        # Plot an example.
-        for b in range(5):
-            plt.figure()
-            for idx in range(3):
-                plt.subplot(3, 1, 1 + idx)
-                plt.plot(batch[b, :, idx].detach().cpu(), alpha = .5, linewidth = 3)
-                plt.plot(out[b, :, idx].detach().cpu())
-                plt.plot(target[b, :, idx].detach().cpu())
-                plt.legend(['Input', 'Output', 'Target'])
-                plt.ylim(-1.2, 1.2)
-            plt.suptitle(f'Training Sample {b}')
+    ax = plt.gca()
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize = 15)
+    plt.tight_layout()
 
 def compute_pca(S, n_components = 10):
     n_components = min(n_components, S.shape[1])
@@ -217,184 +232,17 @@ def compute_pca(S, n_components = 10):
     s = pca.transform(S)
     return pca, s
 
-def compute_and_plot_pca(S, name, ax, plot_explain_variances = False):
-    # activation projections
-    pca, s = compute_pca(S)
-    plot_3d = (ax.name == '3d')
-    T = s.shape[0]
-    inc = T // 10
-    for i in range(0, T, inc):
-        c = [i / float(T - 1), 0.0, 0.0]
-        if plot_3d:
-            ax.plot(s[i:i+inc,0], s[i:i+inc,1], s[i:i+inc,2], '-', linewidth=1, color=c)
-        else:
-            ax.plot(s[i:i+inc,0], s[i:i+inc,1], '-', linewidth=1, color=c)
-
-    ax.set_xlabel('PC1')
-    ax.set_ylabel('PC2')
-    if plot_3d:
-        ax.set_zlabel('PC3')
-        ax.view_init(0,360) 
-    plt.title(f'{name} PCA Projection Over Time (black->red)')
-    plt.tight_layout()
-
-    # explained variance plot
-    if plot_explain_variances:
-        plt.figure()
-        plt.plot(pca.explained_variance_ratio_.cumsum(),'k.')
-        plt.plot([0,pca.n_components],[1,1],'k--')
-        plt.xlabel('# of included components')
-        plt.ylabel('variance explained ratio')
-        plt.title(f'{name}, cumulative variance explained')
-
-    return pca
-
-def analyze_model_old(checkpoint_file):
-    # Load the data and model.
-    inps, targets = multi_task.generate()
-
-    model = torch.load(checkpoint_file)['model']
-#    model = ModelRNN(W.shape[0])
-#    model = model.state_dict()
-    tWout = model['Wout.weight'].cpu()
-    tbout = model['Wout.bias'].cpu()
-    tWin = model['rnn.weight_ih_l0'].cpu()
-    tW = model['rnn.weight_hh_l0'].cpu()
-
-    with torch.no_grad():
-        # Transfer pytorch trained model. 
-        Win = tWin.numpy().T 
-        Wout = tWout.numpy().T
-        W = tW.numpy().T
-        bout = tbout.numpy()
-
-        X = torch.from_numpy(X[None, :10000, :])
-        target = torch.from_numpy(Y[None, :10000, :]).float()
-        ode = Model(Win, Wout, bout, W)
-        ode.set_x(X)
-        ode = ode.cpu()
-
-        N = W.shape[0]
-#        true_s, out = ode.evaluate_ode_mode(X, 'rk4', 1e-5)
-
-        with torch.enable_grad():
-            true_s, out = ode.evaluate(X, grad_record=True)
-            loss_fn = nn.MSELoss()
-            loss = loss_fn(out, target)
-            grad_s = torch.autograd.grad(loss, true_s)[0]
-            guess = 2 / float(out.nelement()) * (out - target)
-            guess = torch.matmul(guess, ode.Wout.transpose(0,1))
-            print(torch.max(torch.abs(guess - grad_s)), guess.max(), grad_s.max())
-
-        true_s, out, grad_s = true_s[0], out[0], grad_s[0]
-
-        nplot = 3000
-#        fig = plt.figure()
-#        ax1 = fig.add_subplot(311)
-#        visualize(X, ax1)
-#        plt.title('inputs')
-#
-#        ax2 = fig.add_subplot(312)
-#        visualize(out, ax2)
-#        plt.title('outputs')
-#
-#        ax3 = fig.add_subplot(313)
-#        visualize(true_s, ax3)
-#        plt.title('activations')
-#        plt.xlabel('time')
-
-        t = torch.arange(X.shape[1]).float()
-        record = adjoint_calculate_RNN(t, true_s, ode, grad_s)
-
-        # Record is a list of augmented states. 
-        # Each augmented state is a list [<UNUSED>, state, adjoint, running grad].
-        states = np.array([a[1].detach().numpy() for a in record])
-        adjoints = np.array([a[2].detach().numpy() for a in record])
-
-        # Look at grads for Win and W. Wout and bout do not have running gradients.
-        for idx, (name, _) in enumerate(ode.named_parameters()):
-            print(name, 3+idx, np.array([a[3+idx].detach().numpy() for a in record]).shape)
-
-        grads_Win = np.array([a[3].detach().numpy() for a in record])
-        grads_W = np.array([a[6].detach().numpy() for a in record])
-        grads_Win = grads_Win.reshape(len(t), -1) # Flatten last two dimensions. [T, 3, H] -> [T, 3*H].
-        grads_W = grads_W.reshape(len(t), -1) # Flatten last two dimensions. [T, H, H] -> [T, H*H].
-
-        # Reverse temporally since these were simulated backwards in time.
-        states = states[::-1]
-        adjoints = adjoints[::-1]
-        grads_Win = grads_Win[::-1]
-        grads_W = grads_W[::-1]
-
-        plt.figure(figsize=(8,6))
-        ax = plt.subplot(511)
-        visualize(X[0], ax, nplot = nplot)
-        plt.title('Inputs')
-        ax = plt.subplot(512)
-        visualize(out, ax, nplot = nplot)
-        plt.title('RNN Output')
-        ax = plt.subplot(513)
-        plt.plot(t[:nplot], states[:nplot, :10])
-        plt.title('Hidden States')
-        ax = plt.subplot(514)
-#        visualize(adjoints[:, :10], ax, nplot = nplot)
-        plt.plot(t[:nplot], adjoints[:nplot, :10])
-#        plt.imshow(adjoints[:nplot].T, aspect='auto', cmap = 'seismic')
-        plt.title('Adjoint Flow')
-        ax = plt.subplot(515)
-#        plt.imshow(grads[:nplot].T, aspect='auto', cmap = 'seismic')
-        plt.plot(t[:nplot], grads_W[:nplot, :10])
-        plt.title('Running Gradient')
-        plt.tight_layout()
-
-        plt.figure()
-        for i in range(5):
-            plt.subplot(5,1,1+i)
-            plt.plot(true_s[:, i], adjoints[:, i])
-        plt.suptitle('Phase Space Plots')
-
-        plt.figure()
-        for i in range(1):
-            plt.subplot(1,1,1+i)
-            plt.plot(t[:nplot*10], true_s[:nplot*10, i])
-            plt.gca().twinx()
-            plt.plot(t[:nplot*10], adjoints[:nplot*10, i], c = 'red')
-        plt.suptitle('Comparitive Plots')
-
-        plt.figure()
-        for i in range(1):
-            plt.subplot(1,1,1+i)
-            v1, v2 = true_s[:, i], adjoints[:, i]
-            v1 = (v1 - v1.min()) / (v1.max() - v1.min())
-            v2 = (v2 - v2.min()) / (v2.max() - v2.min())
-            plt.imshow(np.stack([v1, v2], 0), aspect='auto', cmap = 'binary', interpolation='none')
-            plt.colorbar()
-        plt.suptitle('Comparitive Plots')
-
-        # dimensionality reduction and activity projection
-        # principal component analysis
-        accumulated = np.cumsum(true_s, 0)
-        quantities = [
-            {'val': true_s, 'name': 'Hidden States'},
-            {'val': grads_W, 'name': 'Running $W$ Gradient'},
-            {'val': grads_Win, 'name': 'Running $W_{in}$ Gradient'},
-            {'val': adjoints, 'name': 'Adjoint'},
-            {'val': accumulated, 'name': 'Accumulated'}
-        ]
-        for quant in quantities:
-            fig = plt.figure(figsize=(8,6))
-            ax = fig.add_subplot(111, projection='3d')
-            compute_and_plot_pca(quant['val'], quant['name'], ax, True)
-
-        plt.show()
-
-def analyze_over_training(checkpoints, iteration, save_raw = False):
-    X, Y = multi_task.generate()
+def analyze_over_training(checkpoints, iteration, save_raw = False, debug = False):
+    ''' Runs through training checkpoints and analyzes, mainly through PCA. '''
+    ''' save_raw toggles saving of the full network output. This can be large. '''
+    X, Y = memory_pro.generate()
     t = torch.arange(X.shape[1]).float()
     pbar = tqdm(list(zip(checkpoints, iteration)))
     records_all = []
     for ch, itr in pbar:
         pbar.set_description(ch)
+        record = {'iteration': itr} # All the data is stored in a dict per iteration.
+
         model = torch.load(ch, map_location=torch.device('cpu'))['model']
         tWout = model['Wout.weight']
         tbout = model['Wout.bias']
@@ -407,62 +255,112 @@ def analyze_over_training(checkpoints, iteration, save_raw = False):
             W = tW.numpy().T
             bout = tbout.numpy()
 
-            record = {'iteration': itr}
             ode = Model(Win, Wout, bout, W)
             ode.set_x(X)
             with torch.enable_grad():
                 true_s, out = ode.evaluate(X, grad_record=True)
                 loss_fn = nn.MSELoss()
                 loss = loss_fn(out, Y)
-                grad_s = torch.autograd.grad(loss, true_s)[0]
-
-                # Calculate the scale of the two terms contributing to the gradient.
-                g1 = 2 / float(out.nelement()) * torch.matmul(out, ode.Wout.transpose(0,1))
-                g2 = 2 / float(out.nelement()) * torch.matmul(-Y, ode.Wout.transpose(0,1))
-                record['g1'] = torch.mean(g1.norm(dim=1)).item() # Mean of norm over time.
-                record['g2'] = torch.mean(g2.norm(dim=1)).item()
-                record['loss'] = loss.item()
-
-#                states = true_s.detach().numpy().transpose(1, 0, 2) # Put time in first dimension.
-#                for period, off1, off2 in zip(['stim1', 'memory', 'response'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], states.shape[0]]):
-#                    sub = states[off1:off2]
-#                    pca, s = compute_pca(sub.reshape(-1, sub.shape[2])) # Input shape (tsteps * batch, hidden count).
-#                    s = s.reshape((sub.shape[0], sub.shape[1], -1)) # shape (tsteps, batch, projection components).
-#                    record[f'state_{period}_pca'] = s
-#                    record[f'state_{period}_pca_struct'] = pca
-
-#                if itr == iteration[-1]:
-#                    # Project with consistent PCA and look in 3D at plot.
-#                    pca, s = compute_pca(states.reshape(-1, states.shape[2])) # Input shape (tsteps * batch, hidden count).
-#                    ax = plt.gcf().add_subplot(projection='3d')
-#                    for period, off1, off2 in zip(['stim1', 'memory', 'response'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], states.shape[0]]):
-#                        sub = states[off1:off2]
-#                        s = pca.transform(sub.reshape(-1, sub.shape[2]))
-#                        s = s.reshape((sub.shape[0], sub.shape[1], -1)) # Shape (tsteps, batch, projection components).
-#                        color = 'red' if period == 'stim1' else 'blue'
-#                        color = color if period != 'memory' else 'green'
-#                        for b in range(0, sub.shape[1], 4):
-#                            ax.plot3D(s[:, b, 0], s[:, b, 1], s[:, b, 2], c= color, alpha = 0.5)
-#
-#                    plt.show()
-
-                records_all.append(record)
+                grad_s = torch.autograd.grad(loss, true_s, retain_graph=True)[0]
 
             # Measure adjoints and state over time and record everything.
             data = adjoint_calculate_RNN(t, true_s, ode, grad_s)
 
-            x = np.array([a[1].detach().numpy() for a in data])[::-1, 0]
-            p = np.array([a[2].detach().numpy() for a in data])[::-1, 0]
-            vel = x[1:] - x[:-1] # f(x) - x.
+            # Outer product approach.
+            z = np.array([v[1].detach().numpy() for v in data])[::-1]
+            a = np.array([v[2].detach().numpy() for v in data])[::-1]
+            adjoint_sigma_prime = (1 - z[1:]**2) * a[1:] # ASSUMES TANH ACTIVATION (I.E sig' = (1-sig**)). 
 
-            plt.plot(t[:-1], (vel * p[:-1]).sum(-1), label = f'h_{itr}', color = [itr / iteration[-1], 0., 0.])
-            inds = [1, 2, 3, 6, 7]
-            names = ['state', 'adjoint', 'win_grad', 'w_grad']
+            if debug: # Validate the computed gradient is correct for the W parameter. Could validate others, but any should be good.
+                loss.backward() # Get the gradients with autograd.
+                w_grad_true = ode.W.grad.numpy()
+                w_grad_mine = data[-1][6].detach().numpy()
+
+                g_W = np.zeros((z.shape[1], z.shape[2], z.shape[2])) # [B, N, N].
+                g_W_record = np.zeros((len(t), *g_W.shape))
+                for i in range(z.shape[0]-2, -1, -1):
+                    # Batched outer product.
+                    dot_g = -np.einsum('ij,ik->ijk', z[i], adjoint_sigma_prime[i]) 
+                    g_W = g_W - dot_g # Timestep of length 1.
+                    g_W_record[i] = np.copy(g_W)
+                w_grad_outer = np.sum(g_W, 0)
+
+#                plt.figure(figsize=(9,3))
+#                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+#                plt.subplot(1,3,1)
+#                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
+#                plt.title('Pytorch based $\\nabla_W Loss$')
+#                plt.subplot(1,3,2)
+#                plt.imshow(w_grad_mine, vmin = vmin, vmax = vmax)
+#                plt.title('Adjoint based $\\nabla_W Loss = g_W(0)$')
+#                plt.subplot(1,3,3)
+#                plt.imshow(w_grad_true - w_grad_mine, vmin = vmin, vmax = vmax)
+#                plt.title('Error, True - Mine')
+#                plt.suptitle('Validating Runninng Gradient. Same Color Scale for all.')
+#                plt.savefig('Validated_Grad.pdf')
+#                plt.show()
+                plt.figure(figsize=(12,3))
+                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+                plt.subplot(1,4,1)
+                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
+                plt.colorbar()
+                plt.title('Pytirch Based $\\nabla_W Loss$')
+                plt.subplot(1,4,2)
+                plt.imshow(w_grad_mine)
+                plt.colorbar()
+                plt.title('Adjoint Based $\\nabla_W Loss = g_W(0)$')
+                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+                plt.subplot(1,4,3)
+                plt.imshow(w_grad_outer, vmin = vmin, vmax = vmax)
+                plt.colorbar()
+                plt.title('Adjoint Outer Product Based')
+                plt.subplot(1,4,4)
+                plt.imshow(w_grad_true - w_grad_mine, vmin = vmin, vmax = vmax)
+                plt.title('Error, True - Mine')
+                plt.suptitle('Validating Runninng Gradient. Same Color Scale for all.')
+                plt.savefig('Validated_Grad.pdf')
+                plt.show()
+
+            # TODO: MAKE THIS CLEANER. ESSENTIALLY, to get grad for parameters, we need to pass in each individual data point and concat results ;(.
+            for param_idx in [3, 6]:
+                for idx in range(len(data)):
+                    data[idx][param_idx] = torch.empty((0, *data[idx][param_idx].shape))
+
+                count = 50 if param_idx == 3 else 25 
+                for b in range(count): # Just do a couple data samples since things can get slow and big quick...
+                    X_sub, Y_sub = X[b:b+1], Y[b:b+1]
+                    ode.set_x(X_sub)
+                    with torch.enable_grad():
+                        true_s_sub, out_sub = ode.evaluate(X_sub, grad_record=True)
+                        loss_sub = loss_fn(out_sub, Y_sub)
+                        grad_s_sub = torch.autograd.grad(loss_sub, true_s_sub)[0]
+
+                    # Measure adjoints and set_zlimstate over time and record everything.
+                    data_sub = adjoint_calculate_RNN(t, true_s_sub, ode, grad_s_sub)
+                    for idx in range(len(data)):
+                        data[idx][param_idx] = torch.concatenate([data[idx][param_idx], data_sub[idx][param_idx].unsqueeze(0)])
+
+            # Calculate the scale of the two terms contributing to the gradient.
+            g1 = 2 / float(out.nelement()) * torch.matmul(out, ode.Wout.transpose(0,1))
+            g2 = 2 / float(out.nelement()) * torch.matmul(-Y, ode.Wout.transpose(0,1))
+            record['g1'] = torch.mean(g1.norm(dim=1)).item() # Mean of norm over time.
+            record['g2'] = torch.mean(g2.norm(dim=1)).item()
+            record['loss'] = loss.item()
+
+            vel = z[1:] - z[:-1] # f(x) - x.
+            plt.plot(t[:-1], (vel * a[:-1]).sum(-1), label = f'h_{itr}', color = [itr / iteration[-1], 0., 0.])
+
+            inds = [1, 2, 3, 6, 1]
+            names = ['state', 'adjoint', 'win_grad', 'w_grad', 'adjoint_sigma_prime']
             for ind, name in zip(inds, names):
                 states = np.array([a[ind].detach().numpy() for a in data])[::-1] # reverse time.
+                if name == 'adjoint_sigma_prime':
+                    states = adjoint_sigma_prime
+
                 if save_raw:
                     record[f'{name}_raw'] = states
 
+                # NOTE: Different PCA per iteration! See function below to do same PCA for all.
                 pca, s = compute_pca(states.reshape(states.shape[0] * states.shape[1], -1))
                 s = s.reshape((states.shape[0], states.shape[1], -1)) # shape (tsteps, batch, projection components).
                 record[f'{name}_pca'] = s
@@ -470,76 +368,133 @@ def analyze_over_training(checkpoints, iteration, save_raw = False):
 
             records_all.append(record)
 
-    plt.title('Hamiltonian')
-    plt.xlabel('Time')
-    plt.legend()
-    plt.show()
+#    plt.title('Hamiltonian')
+#    plt.xlabel('Time')
+#    plt.legend()
+#    plt.show()
 
     return records_all
 
-def plot_pca_over_training(records, quantity_name, display_name, cfg):
-    records = records[:18:2]
+def analyze_over_training_SAME_PCA(checkpoints, iteration):
+    ''' Uses a single consistent PCA over all iterations per data column stored. '''
+    record = analyze_over_training(checkpoints, iteration, save_raw = True)
+    names = ['state', 'adjoint', 'win_grad', 'w_grad']
+    for name in names:
+        all_iters = [entry[f'{name}_raw'] for entry in record]
+        entry_shape = all_iters[0].shape
+        all_iters = [entry.reshape(entry.shape[0] * entry.shape[1], -1) for entry in all_iters]
+        all_iters = np.concatenate(all_iters)
+        pca, s = compute_pca(all_iters)
+        s = s.reshape((len(record), entry_shape[0], entry_shape[1], -1))
+        # Update the PCA entries in the record.
+        for entry, s_itr in zip(record, s):
+            entry[f'{name}_pca'] = s_itr
+            entry[f'{name}_pca_struct'] = pca
+    return record 
+
+def make_grid_fig(records):
     M = int(len(records) ** .5)
     N = int(np.ceil(len(records) / float(M)))
-    fig = plt.figure(figsize=(N * 4, M * 3))
+    return plt.figure(figsize=(N * 4, M * 3)), M, N
+
+def plot_raw_over_training(records, quantity_name, display_name, cfg, trial_idx = 0):
+    fig, M, N = make_grid_fig(records)
+    for plot_idx, record in enumerate(records):
+        ax = fig.add_subplot(M, N, plot_idx + 1)
+        s = record[f'{quantity_name}_raw']
+        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+            end = min(off2+1, s.shape[0])
+            sub = s[off1:end, trial_idx] # Only plot one trial.
+            sub = sub.reshape((sub.shape[0], -1))
+            ax.plot(np.arange(off1, end), sub, c = color, alpha = 0.5)
+
+        ax.set_xlabel('Time Step')
+        plt.title(f'Iteration {record["iteration"]}')
+    plt.suptitle(f'{display_name} Over Training. Single Trial.')
+    plt.tight_layout()
+
+def plot_raw_over_training_multitrial(records, quantity_name, display_name, cfg, trial_inds = list(range(10))):
+    fig, M, N = make_grid_fig(records)
+    for plot_idx, record in enumerate(records):
+        ax = fig.add_subplot(M, N, plot_idx + 1)
+        s = record[f'{quantity_name}_raw']
+        for trial_idx in trial_inds:
+            color = plt.rcParams['axes.prop_cycle'].by_key()['color'][trial_idx % 10] # Default matplotlib colors.
+            for style, off1, off2 in zip(['-', 'dashed', 'dotted'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+                end = min(off2+1, s.shape[0])
+                sub = s[off1:end, trial_idx] # Only plot one trial.
+                ax.plot(np.arange(off1, end), sub, alpha = 0.5, linestyle = style, c = color)
+
+        ax.set_xlabel('Time Step')
+        plt.title(f'Iteration {record["iteration"]}')
+    plt.suptitle(f'{display_name} Over Training. {len(trial_inds)} Trials.')
+    plt.tight_layout()
+
+def plot_phase_space_over_training(records, cfg, trial_idx = 0, sample_idx = 0):
+    ''' Plot phase space comparing adjoint and forward state over training iterations. '''
+    fig, M, N = make_grid_fig(records)
+    for plot_idx, record in enumerate(records):
+        ax = fig.add_subplot(M, N, plot_idx + 1)
+        s, adj = record[f'state_raw'], record[f'adjoint_raw']
+        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+            sub_s, sub_adj = s[off1:off2+1, trial_idx], adj[off1:off2+1, trial_idx] # Only plot one trial.
+            ax.plot(sub_s[:, sample_idx], sub_adj[:, sample_idx], c = color, alpha = 0.5) 
+        ax.set_xlabel(f'State[{sample_idx}]')
+        ax.set_ylabel(f'Adjoint[{sample_idx}]')
+        plt.title(f'Iteration {record["iteration"]}')
+
+    plt.suptitle(f'Phase Space Over Training. Single Trial.')
+    plt.tight_layout()
+
+def plot_pca_over_training(records, quantity_name, display_name, cfg):
+    fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
         s = record[f'{quantity_name}_pca']
-
-        for period, off1, off2 in zip(['stim1', 'memory', 'response'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
             sub = s[off1:off2+1]
-            color = 'red' if period == 'stim1' else 'blue'
-            color = color if period != 'memory' else 'green'
             for b in range(0, sub.shape[1], 10):
                 ax.plot3D(sub[:, b, 0], sub[:, b, 1], sub[:, b, 2], c = color, alpha = 0.5)
 
-
-#        for i in range(0, T, inc-1):
-#            c = [i / float(T - 1), 0.0, 0.0]
-#            ax.plot(s[i:i+inc,::4,0], s[i:i+inc,::4,1], '-', linewidth=.7, color=c)
+        # Consistent scaling of all axes. If a PC has a very small scale, we don't really care about it! 
+#        min_dim, max_dim = np.min(s), np.max(s)
+#        ax.set_xlim(min_dim, max_dim)
+#        ax.set_ylim(min_dim, max_dim)
+#        ax.set_zlim(min_dim, max_dim)
 
         accuracy = sum(record[f'{quantity_name}_pca_struct'].explained_variance_ratio_[:3]) * 100
-
         ax.set_xlabel('PC1')
         ax.set_ylabel('PC2')
+        ax.set_zlabel('PC3')
         plt.title(f'Iteration {record["iteration"]}; 3D acc = {accuracy:.1f}%')
     plt.suptitle(f'{display_name} PCA Projection Over Time')
     plt.tight_layout()
 
-def wiener_process_analyze(records, quantity_name, display_name):
-    M = int(len(records) ** .5)
-    N = int(np.ceil(len(records) / float(M)))
-    fig = plt.figure(figsize=(N * 4, M * 3))
+def plot_pca_fixed_points_over_training(records, quantity_name, display_name, cfg):
+    fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
-        ax = fig.add_subplot(M, N, plot_idx + 1)
+        ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
         s = record[f'{quantity_name}_pca']
-        incs = s[1:] - s[:-1]
+        for color, off in zip(['black', 'red', 'green', 'blue'], [0, cfg['T_stim']-1, cfg['T_stim']+cfg['T_memory']-1, s.shape[0]-1]):
+            ax.scatter(s[off, :, 0], s[off, :, 1], s[off, :, 2], c = color, alpha = 0.7, marker='^', s = .4)
 
-        H, xedges, yedges = np.histogram2d(incs[:,0], incs[:,1], bins=60)
-        H = H + 1 # +1 just so to not have log(0) below.
-        ax.imshow(H.T, cmap='seismic', interpolation='bilinear', norm=mpl.colors.LogNorm(), extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]], origin = 'lower')
+        # Consistent scaling of all axes. If a PC has a very small scale, we don't really care about it! 
+#        min_dim, max_dim = np.min(s), np.max(s)
+#        ax.set_xlim(min_dim, max_dim)
+#        ax.set_ylim(min_dim, max_dim)
+#        ax.set_zlim(min_dim, max_dim)
+
+        accuracy = sum(record[f'{quantity_name}_pca_struct'].explained_variance_ratio_[:3]) * 100
         ax.set_xlabel('PC1')
         ax.set_ylabel('PC2')
-        plt.title(f'Iteration {record["iteration"]}')
-    plt.suptitle(f'{display_name} PCA Increment Histograms')
-    plt.tight_layout()
-
-def plot_pca_matrix_over_training(records, quantity_name, display_name):
-    M = int(len(records) ** .5)
-    N = int(np.ceil(len(records) / float(M)))
-    fig = plt.figure(figsize=(N * 4, M * 3))
-    for plot_idx, record in enumerate(records):
-        ax = fig.add_subplot(M, N, plot_idx + 1)
-        pca = record[f'{quantity_name}_pca_struct']
-        plt.imshow(pca.components_[:3, :], aspect = 'auto', interpolation = 'none', cmap = 'gist_rainbow')
-        plt.title(f'Iteration {record["iteration"]}')
-    plt.suptitle(f'{display_name} PCA Matrices over training')
+        ax.set_zlabel('PC3')
+        plt.title(f'Iteration {record["iteration"]}; 3D acc = {accuracy:.1f}%')
+    plt.suptitle(f'{display_name} PCA Projection Final Points of Each Phase')
     plt.tight_layout()
 
 if __name__ == "__main__":
-    root = '' if not args.continuous else 'continuous_task/'
+    root = './'
     ping_dir(root)
-
     if args.retrain:
         ping_dir(root + 'checkpoints', clear = True)
         train(root, debug = True)
@@ -554,49 +509,80 @@ if __name__ == "__main__":
         analyze_model_old(files[-1])
 
     if args.repca:
-        training_run = analyze_over_training(files, iteration)
-        with open(root + 'training_run.pt', "wb") as fp:
+        training_run = analyze_over_training_SAME_PCA(files, iteration)
+        with open(root + 'training_run_SAME_PCA_.pt', "wb") as fp:
             pickle.dump(training_run, fp)
 
-    with open(root + 'training_run.pt', "rb") as fp:
+    with open(root + 'training_run_SAME_PCA_.pt', "rb") as fp:
         training_run = pickle.load(fp)
 
-    plt.figure()
-    plt.plot([record['loss'] for record in training_run])
-    plt.title('Loss on Full Timeframe')
+    save_dir = root + 'May_6/' # CUSTOMIZE.
+    ping_dir(save_dir)
 
+    # Plot loss on task.
     plt.figure()
-    print(len(iteration), len(training_run))
+    plt.plot(iteration, [record['loss'] for record in training_run])
+    plt.title('Train Loss')
+    plt.savefig(save_dir + 'Loss.png')
+
+    # Terms contributing to adjoint.
+    plt.figure()
     plt.plot(iteration, [record['g1'] for record in training_run], color = "#ffab40", linewidth=4)
     plt.plot(iteration, [record['g2'] for record in training_run], color = "#c27ba0", linewidth=4)
     plt.xlabel('Training Iteration')
     plt.legend(['Term 1 Norm', 'Term 2 Norm'])
-    plt.savefig(root + 'Terms.png')
+    plt.savefig(save_dir + 'Terms.png')
+
+    # Just to illustrate the task on a single trial.
+    plot_example_single_trial(files[-1])
+    plt.savefig(save_dir + 'Figure_Single_Trial.pdf')
+
+#    training_run = training_run[:18:2] # Subset for plots.
+    training_run = training_run[:9] # Subset for plots.
+
+    # Analyze PCA over training.
+    ping_dir(save_dir + 'pca_plots/')
+#    plot_pca_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
+#    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_2.png')
+#    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_3.png')
+#    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_4.png')
+#
+#    # Analyze PCA fixed points over training.
+#    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_10.png')
+#    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'pca_plots/Figure_11.png')
+    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_12.png')
+    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_13.png')
+
+    # Analyze raw hidden state and adjoint (no PCA) over training.
+    ping_dir(save_dir + 'raw_plots/')
+    plot_raw_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_13.png')
+    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_14.png')
+    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_18.png')
+
+#    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'raw_plots/Figure_15.png')
+#    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'raw_plots/Figure_16.png')
+#
+#    plot_phase_space_over_training(training_run, cfg = memory_pro.DEFAULT_CFG)
+#    plt.savefig(save_dir + 'raw_plots/Figure_17.png')
+
+    plot_pca_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_20.png')
+    plot_pca_fixed_points_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_21.png')
+    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_22.png')
+
     plt.show()
-
-    ping_dir(root + 'pca_plots/')
-    plot_pca_over_training(training_run, 'state', 'Hidden States', cfg = multi_task.DEFAULT_CFG)
-    plt.savefig(root + 'pca_plots/Figure_1.png')
-    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', cfg = multi_task.DEFAULT_CFG)
-    plt.savefig(root + 'pca_plots/Figure_2.png')
-    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = multi_task.DEFAULT_CFG)
-    plt.savefig(root + 'pca_plots/Figure_3.png')
-    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = multi_task.DEFAULT_CFG)
-    plt.savefig(root + 'pca_plots/Figure_4.png')
-    plt.show()
-
-    plot_pca_matrix_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient')
-    plt.savefig(root + 'pca_plots/Figure_5.png')
-    plot_pca_matrix_over_training(training_run, 'w_grad', 'Running $W$ Gradient')
-    plt.savefig(root + 'pca_plots/Figure_6.png')
-
-    wiener_process_analyze(training_run, 'win_grad', 'Running $W_{in}$ Gradient')
-    plt.savefig(root + 'pca_plots/Figure_7.png')
-    wiener_process_analyze(training_run, 'w_grad', 'Running $W$ Gradient')
-    plt.savefig(root + 'pca_plots/Figure_8.png')
-
-    plot_pca_over_training(training_run, 'joint', 'Joint States')
-    plt.savefig(root + 'pca_plots/Figure_9.png')
-
-    plt.show()
-    exit()
