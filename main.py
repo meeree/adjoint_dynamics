@@ -14,7 +14,7 @@ import time
 import pickle
 import glob
 import re, os
-import memory_pro 
+import memory_pro, category_pro
 
 parser = argparse.ArgumentParser('Single Task Adjoints RNN Example')
 parser.add_argument('--batch_size', type=int, default=100)
@@ -110,11 +110,12 @@ def ping_dir(directory, clear = False):
     if len(directory) == 0:
         return 
 
-    if clear:
-        import shutil
-        shutil.rmtree(directory)
-
-    if not os.path.exists(directory):
+    if os.path.exists(directory):
+        if clear:
+            import shutil
+            shutil.rmtree(directory)
+            os.mkdir(directory)
+    else:
         os.mkdir(directory)
 
 def train(root_dir, plot = True):
@@ -124,7 +125,7 @@ def train(root_dir, plot = True):
 #    torch.manual_seed(2)
 #    np.random.seed(2)
 
-    inps, targets = memory_pro.generate()
+    inps, targets = category_pro.generate()
     dset = torch.utils.data.TensorDataset(inps, targets)
     dloader = torch.utils.data.DataLoader(dset, batch_size=args.batch_size, shuffle=True)
     model = ModelRNN(args.n_hidden)
@@ -150,7 +151,7 @@ def train(root_dir, plot = True):
 
         # Checkpoint Saving.
         losses.append(loss.item())
-        accs.append(memory_pro.accuracy(out, target).item())
+        accs.append(category_pro.accuracy(out, target).item())
         checkpoint = {
             'losses': losses,
             'accuracies': accs,
@@ -184,7 +185,7 @@ def train(root_dir, plot = True):
         plt.xlabel('Iteration')
 
 def plot_example_single_trial(checkpoint):
-    X, Y = memory_pro.generate()
+    X, Y = category_pro.generate()
     t = torch.arange(X.shape[1]).float()
 
     model = torch.load(checkpoint, map_location=torch.device('cpu'))['model']
@@ -235,7 +236,7 @@ def compute_pca(S, n_components = 10):
 def analyze_over_training(checkpoints, iteration, save_raw = False, debug = False):
     ''' Runs through training checkpoints and analyzes, mainly through PCA. '''
     ''' save_raw toggles saving of the full network output. This can be large. '''
-    X, Y = memory_pro.generate()
+    X, Y = category_pro.generate()
     t = torch.arange(X.shape[1]).float()
     pbar = tqdm(list(zip(checkpoints, iteration)))
     records_all = []
@@ -304,7 +305,7 @@ def analyze_over_training(checkpoints, iteration, save_raw = False, debug = Fals
                 plt.subplot(1,4,1)
                 plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
                 plt.colorbar()
-                plt.title('Pytirch Based $\\nabla_W Loss$')
+                plt.title('Pytorch Based $\\nabla_W Loss$')
                 plt.subplot(1,4,2)
                 plt.imshow(w_grad_mine)
                 plt.colorbar()
@@ -450,6 +451,7 @@ def plot_pca_over_training(records, quantity_name, display_name, cfg):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
+        ax.view_init(azim=0, elev=90)
         s = record[f'{quantity_name}_pca']
         for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
             sub = s[off1:off2+1]
@@ -493,11 +495,11 @@ def plot_pca_fixed_points_over_training(records, quantity_name, display_name, cf
     plt.tight_layout()
 
 if __name__ == "__main__":
-    root = './'
+    root = './CategoryPro/'
     ping_dir(root)
     if args.retrain:
         ping_dir(root + 'checkpoints', clear = True)
-        train(root, debug = True)
+        train(root, plot = True)
         plt.show()
 
     files = glob.glob(root + 'checkpoints/*.pt')
@@ -516,7 +518,7 @@ if __name__ == "__main__":
     with open(root + 'training_run_SAME_PCA_.pt', "rb") as fp:
         training_run = pickle.load(fp)
 
-    save_dir = root + 'May_6/' # CUSTOMIZE.
+    save_dir = root + 'May_7/' # CUSTOMIZE.
     ping_dir(save_dir)
 
     # Plot loss on task.
@@ -542,47 +544,48 @@ if __name__ == "__main__":
 
     # Analyze PCA over training.
     ping_dir(save_dir + 'pca_plots/')
-#    plot_pca_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
-#    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_2.png')
-#    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_3.png')
-#    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_4.png')
-#
-#    # Analyze PCA fixed points over training.
-#    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_10.png')
-#    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'pca_plots/Figure_11.png')
-    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plot_pca_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
+    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_2.png')
+    plt.show()
+    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_3.png')
+    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_4.png')
+
+    # Analyze PCA fixed points over training.
+    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_10.png')
+    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'pca_plots/Figure_11.png')
+    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'pca_plots/Figure_12.png')
-    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'pca_plots/Figure_13.png')
 
     # Analyze raw hidden state and adjoint (no PCA) over training.
     ping_dir(save_dir + 'raw_plots/')
-    plot_raw_over_training(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'raw_plots/Figure_13.png')
-    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'raw_plots/Figure_14.png')
-    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = memory_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'raw_plots/Figure_18.png')
 
-#    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'raw_plots/Figure_15.png')
-#    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'raw_plots/Figure_16.png')
-#
-#    plot_phase_space_over_training(training_run, cfg = memory_pro.DEFAULT_CFG)
-#    plt.savefig(save_dir + 'raw_plots/Figure_17.png')
+    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_15.png')
+    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_16.png')
 
-    plot_pca_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plot_phase_space_over_training(training_run, cfg = category_pro.DEFAULT_CFG)
+    plt.savefig(save_dir + 'raw_plots/Figure_17.png')
+
+    plot_pca_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'pca_plots/Figure_20.png')
-    plot_pca_fixed_points_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'pca_plots/Figure_21.png')
-    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = memory_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
     plt.savefig(save_dir + 'pca_plots/Figure_22.png')
 
     plt.show()

@@ -1,4 +1,4 @@
-# Simplified task based on Flexible multitask computation in recurrent networks utilizes shared dynamical motifs
+# Simplified MemoryPro task based on Flexible multitask computation in recurrent networks utilizes shared dynamical motifs
 import torch
 from torch import nn
 import numpy as np
