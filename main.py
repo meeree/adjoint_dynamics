@@ -14,7 +14,8 @@ import time
 import pickle
 import glob
 import re, os
-import memory_pro, category_pro
+
+COLORS = ['red', 'green', 'blue', 'yellow']
 
 parser = argparse.ArgumentParser('Single Task Adjoints RNN Example')
 parser.add_argument('--batch_size', type=int, default=100)
@@ -26,9 +27,16 @@ parser.add_argument('--n_hidden', type=int, default=100)
 parser.add_argument('--niters', type=int, default=50000)
 parser.add_argument('--retrain', type=bool, default=False)
 parser.add_argument('--repca', type=bool, default=False)
+parser.add_argument('--task', type=str, default='memory_pro')
 parser.add_argument('--analyze_best', type=bool, default=False)
 args = parser.parse_args()
 device = 'cpu'
+if args.task == 'memory_pro':
+    import memory_pro as task
+elif args.task == 'category_pro':
+    import category_pro as task
+elif args.task == 'mix_mem_cat':
+    import memory_category_mix as task
 
 class Model(nn.Module):
     ''' The model in this case is just an RNN (hand built). '''
@@ -89,9 +97,9 @@ class Model(nn.Module):
         return s, out
 
 class ModelRNN(nn.Module):
-    def __init__(self, n_hidden):
+    def __init__(self, n_hidden, n_in = 3, n_out = 3):
         super().__init__()
-        self.n_out, self.n_in = 3, 3 
+        self.n_out, self.n_in = n_out, n_in
         self.n_hidden = n_hidden
 
         self.Wout = nn.Linear(n_hidden, self.n_out)
@@ -125,10 +133,10 @@ def train(root_dir, plot = True):
 #    torch.manual_seed(2)
 #    np.random.seed(2)
 
-    inps, targets = category_pro.generate()
+    inps, targets = task.generate()
     dset = torch.utils.data.TensorDataset(inps, targets)
     dloader = torch.utils.data.DataLoader(dset, batch_size=args.batch_size, shuffle=True)
-    model = ModelRNN(args.n_hidden)
+    model = ModelRNN(args.n_hidden, inps.shape[-1], targets.shape[-1])
 
     # Training with Adam.
     losses, accs = [], []
@@ -151,7 +159,7 @@ def train(root_dir, plot = True):
 
         # Checkpoint Saving.
         losses.append(loss.item())
-        accs.append(category_pro.accuracy(out, target).item())
+        accs.append(task.accuracy(out, target).item())
         checkpoint = {
             'losses': losses,
             'accuracies': accs,
@@ -185,7 +193,7 @@ def train(root_dir, plot = True):
         plt.xlabel('Iteration')
 
 def plot_example_single_trial(checkpoint):
-    X, Y = category_pro.generate()
+    X, Y = task.generate(noise=False)
     t = torch.arange(X.shape[1]).float()
 
     model = torch.load(checkpoint, map_location=torch.device('cpu'))['model']
@@ -236,7 +244,7 @@ def compute_pca(S, n_components = 10):
 def analyze_over_training(checkpoints, iteration, save_raw = False, debug = False):
     ''' Runs through training checkpoints and analyzes, mainly through PCA. '''
     ''' save_raw toggles saving of the full network output. This can be large. '''
-    X, Y = category_pro.generate()
+    X, Y = task.generate(noise=False)
     t = torch.arange(X.shape[1]).float()
     pbar = tqdm(list(zip(checkpoints, iteration)))
     records_all = []
@@ -270,7 +278,7 @@ def analyze_over_training(checkpoints, iteration, save_raw = False, debug = Fals
             # Outer product approach.
             z = np.array([v[1].detach().numpy() for v in data])[::-1]
             a = np.array([v[2].detach().numpy() for v in data])[::-1]
-            adjoint_sigma_prime = (1 - z[1:]**2) * a[1:] # ASSUMES TANH ACTIVATION (I.E sig' = (1-sig**)). 
+            adjoint_sigma_prime = (1 - z[1:]**2) * a[1:] # ASSUMES TANH ACTIVATION (I.E sig' = (1-sig**2)). 
 
             if debug: # Validate the computed gradient is correct for the W parameter. Could validate others, but any should be good.
                 loss.backward() # Get the gradients with autograd.
@@ -323,23 +331,23 @@ def analyze_over_training(checkpoints, iteration, save_raw = False, debug = Fals
                 plt.show()
 
             # TODO: MAKE THIS CLEANER. ESSENTIALLY, to get grad for parameters, we need to pass in each individual data point and concat results ;(.
-            for param_idx in [3, 6]:
-                for idx in range(len(data)):
-                    data[idx][param_idx] = torch.empty((0, *data[idx][param_idx].shape))
-
-                count = 50 if param_idx == 3 else 25 
-                for b in range(count): # Just do a couple data samples since things can get slow and big quick...
-                    X_sub, Y_sub = X[b:b+1], Y[b:b+1]
-                    ode.set_x(X_sub)
-                    with torch.enable_grad():
-                        true_s_sub, out_sub = ode.evaluate(X_sub, grad_record=True)
-                        loss_sub = loss_fn(out_sub, Y_sub)
-                        grad_s_sub = torch.autograd.grad(loss_sub, true_s_sub)[0]
-
-                    # Measure adjoints and set_zlimstate over time and record everything.
-                    data_sub = adjoint_calculate_RNN(t, true_s_sub, ode, grad_s_sub)
-                    for idx in range(len(data)):
-                        data[idx][param_idx] = torch.concatenate([data[idx][param_idx], data_sub[idx][param_idx].unsqueeze(0)])
+#            for param_idx in [3, 6]:
+#                for idx in range(len(data)):
+#                    data[idx][param_idx] = torch.empty((0, *data[idx][param_idx].shape))
+#
+#                count = 50 if param_idx == 3 else 25 
+#                for b in range(count): # Just do a couple data samples since things can get slow and big quick...
+#                    X_sub, Y_sub = X[b:b+1], Y[b:b+1]
+#                    ode.set_x(X_sub)
+#                    with torch.enable_grad():
+#                        true_s_sub, out_sub = ode.evaluate(X_sub, grad_record=True)
+#                        loss_sub = loss_fn(out_sub, Y_sub)
+#                        grad_s_sub = torch.autograd.grad(loss_sub, true_s_sub)[0]
+#
+#                    # Measure adjoints and set_zlimstate over time and record everything.
+#                    data_sub = adjoint_calculate_RNN(t, true_s_sub, ode, grad_s_sub)
+#                    for idx in range(len(data)):
+#                        data[idx][param_idx] = torch.concatenate([data[idx][param_idx], data_sub[idx][param_idx].unsqueeze(0)])
 
             # Calculate the scale of the two terms contributing to the gradient.
             g1 = 2 / float(out.nelement()) * torch.matmul(out, ode.Wout.transpose(0,1))
@@ -351,12 +359,17 @@ def analyze_over_training(checkpoints, iteration, save_raw = False, debug = Fals
             vel = z[1:] - z[:-1] # f(x) - x.
             plt.plot(t[:-1], (vel * a[:-1]).sum(-1), label = f'h_{itr}', color = [itr / iteration[-1], 0., 0.])
 
-            inds = [1, 2, 3, 6, 1]
-            names = ['state', 'adjoint', 'win_grad', 'w_grad', 'adjoint_sigma_prime']
+            normalize_fn = lambda x: (x - x.min()) / (x.max() - x.min())
+
+            joint = np.concatenate([normalize_fn(z), normalize_fn(a)], -1)
+            inds = [1, 2, 3, 6, 1, 1]
+            names = ['state', 'adjoint', 'win_grad', 'w_grad', 'adjoint_sigma_prime', 'joint']
             for ind, name in zip(inds, names):
                 states = np.array([a[ind].detach().numpy() for a in data])[::-1] # reverse time.
                 if name == 'adjoint_sigma_prime':
                     states = adjoint_sigma_prime
+                if name == 'joint':
+                    states = joint 
 
                 if save_raw:
                     record[f'{name}_raw'] = states
@@ -398,30 +411,31 @@ def make_grid_fig(records):
     N = int(np.ceil(len(records) / float(M)))
     return plt.figure(figsize=(N * 4, M * 3)), M, N
 
-def plot_raw_over_training(records, quantity_name, display_name, cfg, trial_idx = 0):
+def plot_raw_over_training(records, quantity_name, display_name, intervals, trial_idx = 0):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1)
         s = record[f'{quantity_name}_raw']
-        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+        for color, off1, off2 in zip(COLORS, intervals[:-1], intervals[1:]):
             end = min(off2+1, s.shape[0])
             sub = s[off1:end, trial_idx] # Only plot one trial.
             sub = sub.reshape((sub.shape[0], -1))
-            ax.plot(np.arange(off1, end), sub, c = color, alpha = 0.5)
+            ax.plot(np.arange(off1, end), sub[:, :100], c = color, alpha = 0.5, linestyle = 'dotted')
+            ax.plot(np.arange(off1, end), sub[:, 100:]+1, c = color, alpha = 0.5, linestyle = 'dashed')
 
         ax.set_xlabel('Time Step')
         plt.title(f'Iteration {record["iteration"]}')
     plt.suptitle(f'{display_name} Over Training. Single Trial.')
     plt.tight_layout()
 
-def plot_raw_over_training_multitrial(records, quantity_name, display_name, cfg, trial_inds = list(range(10))):
+def plot_raw_over_training_multitrial(records, quantity_name, display_name, intervals, trial_inds = list(range(10))):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1)
         s = record[f'{quantity_name}_raw']
         for trial_idx in trial_inds:
             color = plt.rcParams['axes.prop_cycle'].by_key()['color'][trial_idx % 10] # Default matplotlib colors.
-            for style, off1, off2 in zip(['-', 'dashed', 'dotted'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+            for style, off1, off2 in zip(['-', 'dashed', 'dotted'], intervals[:-1], intervals[1:]):
                 end = min(off2+1, s.shape[0])
                 sub = s[off1:end, trial_idx] # Only plot one trial.
                 ax.plot(np.arange(off1, end), sub, alpha = 0.5, linestyle = style, c = color)
@@ -431,32 +445,17 @@ def plot_raw_over_training_multitrial(records, quantity_name, display_name, cfg,
     plt.suptitle(f'{display_name} Over Training. {len(trial_inds)} Trials.')
     plt.tight_layout()
 
-def plot_phase_space_over_training(records, cfg, trial_idx = 0, sample_idx = 0):
-    ''' Plot phase space comparing adjoint and forward state over training iterations. '''
-    fig, M, N = make_grid_fig(records)
-    for plot_idx, record in enumerate(records):
-        ax = fig.add_subplot(M, N, plot_idx + 1)
-        s, adj = record[f'state_raw'], record[f'adjoint_raw']
-        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
-            sub_s, sub_adj = s[off1:off2+1, trial_idx], adj[off1:off2+1, trial_idx] # Only plot one trial.
-            ax.plot(sub_s[:, sample_idx], sub_adj[:, sample_idx], c = color, alpha = 0.5) 
-        ax.set_xlabel(f'State[{sample_idx}]')
-        ax.set_ylabel(f'Adjoint[{sample_idx}]')
-        plt.title(f'Iteration {record["iteration"]}')
-
-    plt.suptitle(f'Phase Space Over Training. Single Trial.')
-    plt.tight_layout()
-
-def plot_pca_over_training(records, quantity_name, display_name, cfg):
+def plot_pca_over_training(records, quantity_name, display_name, intervals):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
         ax.view_init(azim=0, elev=90)
         s = record[f'{quantity_name}_pca']
-        for color, off1, off2 in zip(['red', 'green', 'blue'], [0, cfg['T_stim'], cfg['T_stim']+cfg['T_memory']], [cfg['T_stim'], cfg['T_stim']+cfg['T_memory'], s.shape[0]]):
+        for color, off1, off2 in zip(COLORS, intervals[:-1], intervals[1:]):
             sub = s[off1:off2+1]
             for b in range(0, sub.shape[1], 10):
-                ax.plot3D(sub[:, b, 0], sub[:, b, 1], sub[:, b, 2], c = color, alpha = 0.5)
+                ax.plot3D(sub[:, b, 0], sub[:, b, 1], sub[:, b, 2], c = color, alpha = 0.3)
+                ax.scatter(sub[-2, b, 0], sub[-2, b, 1], sub[-2, b, 2], c = color, alpha = 0.7, marker='^', s = 10., zorder=10)
 
         # Consistent scaling of all axes. If a PC has a very small scale, we don't really care about it! 
 #        min_dim, max_dim = np.min(s), np.max(s)
@@ -472,12 +471,13 @@ def plot_pca_over_training(records, quantity_name, display_name, cfg):
     plt.suptitle(f'{display_name} PCA Projection Over Time')
     plt.tight_layout()
 
-def plot_pca_fixed_points_over_training(records, quantity_name, display_name, cfg):
+def plot_pca_fixed_points_over_training(records, quantity_name, display_name, intervals):
     fig, M, N = make_grid_fig(records)
+    colors = ['black'] + COLORS
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
         s = record[f'{quantity_name}_pca']
-        for color, off in zip(['black', 'red', 'green', 'blue'], [0, cfg['T_stim']-1, cfg['T_stim']+cfg['T_memory']-1, s.shape[0]-1]):
+        for color, off in zip(colors, intervals):
             ax.scatter(s[off, :, 0], s[off, :, 1], s[off, :, 2], c = color, alpha = 0.7, marker='^', s = .4)
 
         # Consistent scaling of all axes. If a PC has a very small scale, we don't really care about it! 
@@ -494,9 +494,30 @@ def plot_pca_fixed_points_over_training(records, quantity_name, display_name, cf
     plt.suptitle(f'{display_name} PCA Projection Final Points of Each Phase')
     plt.tight_layout()
 
+
+def plot_hamiltonian_over_training(records, intervals, trial_idx = 0):
+    ''' Plot hamiltonian space comparing adjoint and forward state over training iterations. '''
+    fig, M, N = make_grid_fig(records)
+    for plot_idx, record in enumerate(records):
+        ax = fig.add_subplot(M, N, plot_idx + 1)
+        s, adj = record[f'state_raw'], record[f'adjoint_raw']
+        vel = s[1:] - s[:-1]
+        H = (adj[:-1] * vel).sum(-1) # Dot product.
+        for color, off1, off2 in zip(COLORS, intervals[:-1], intervals[1:]):
+            sub_H = H[off1:off2+1, :]
+            ax.plot(range(off1, off2+1), sub_H, c = color, alpha = 0.5) 
+        ax.set_xlabel(f'Time Step')
+        ax.set_ylabel(f'Hamiltonian')
+        plt.title(f'Iteration {record["iteration"]}')
+
+    plt.suptitle(f'Hamiltonian Over Training. All Trials.')
+    plt.tight_layout()
+
 if __name__ == "__main__":
-    root = './CategoryPro/'
+    root = args.task + '/'
     ping_dir(root)
+    print(f'Root Directory {root}')
+
     if args.retrain:
         ping_dir(root + 'checkpoints', clear = True)
         train(root, plot = True)
@@ -518,7 +539,11 @@ if __name__ == "__main__":
     with open(root + 'training_run_SAME_PCA_.pt', "rb") as fp:
         training_run = pickle.load(fp)
 
-    save_dir = root + 'May_7/' # CUSTOMIZE.
+    intervals = [0, 30, 60, 90] 
+    if args.task == 'mem_cat_mix':
+        intervals += ['120'] # Extra context interval.
+
+    save_dir = root + 'May_14/' # CUSTOMIZE.
     ping_dir(save_dir)
 
     # Plot loss on task.
@@ -544,48 +569,63 @@ if __name__ == "__main__":
 
     # Analyze PCA over training.
     ping_dir(save_dir + 'pca_plots/')
-    plot_pca_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
-    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'pca_plots/Figure_2.png')
+
+    plot_pca_over_training(training_run[0:1], 'state', 'Hidden States', intervals = intervals)
+    plot_pca_over_training(training_run[-1:], 'state', 'Hidden States', intervals = intervals)
+    plt.savefig(save_dir + 'pca_plots/TrainingEndHidden.png')
+    plot_pca_over_training(training_run[0:1], 'adjoint', 'Adjoint', intervals = intervals)
+    plt.savefig(save_dir + 'pca_plots/TrainingStartAdjoint.png')
+    plot_pca_over_training(training_run[-1:], 'adjoint', 'Adjoint', intervals = intervals)
+    plt.savefig(save_dir + 'pca_plots/TrainingEndAdjoint.png')
     plt.show()
-    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
+
+    plot_pca_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
+    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
+    plot_pca_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
+    plt.savefig(save_dir + 'pca_plots/Figure_2.png')
+    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_3.png')
-    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_4.png')
 
     # Analyze PCA fixed points over training.
-    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_10.png')
-    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_11.png')
-    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_12.png')
-    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_13.png')
 
     # Analyze raw hidden state and adjoint (no PCA) over training.
     ping_dir(save_dir + 'raw_plots/')
-    plot_raw_over_training(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
     plt.savefig(save_dir + 'raw_plots/Figure_13.png')
-    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
     plt.savefig(save_dir + 'raw_plots/Figure_14.png')
-    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', cfg = category_pro.DEFAULT_CFG)
+    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
     plt.savefig(save_dir + 'raw_plots/Figure_18.png')
 
-    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', cfg = category_pro.DEFAULT_CFG)
+    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', intervals = intervals)
     plt.savefig(save_dir + 'raw_plots/Figure_15.png')
-    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', cfg = category_pro.DEFAULT_CFG)
+    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', intervals = intervals)
     plt.savefig(save_dir + 'raw_plots/Figure_16.png')
 
-    plot_phase_space_over_training(training_run, cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'raw_plots/Figure_17.png')
+    plot_hamiltonian_over_training(training_run, intervals = intervals)
+    plt.savefig(save_dir + 'raw_plots/Figure_23.png')
 
-    plot_pca_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'pca_plots/Figure_20.png')
-    plot_pca_fixed_points_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'pca_plots/Figure_21.png')
-    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', cfg = category_pro.DEFAULT_CFG)
-    plt.savefig(save_dir + 'pca_plots/Figure_22.png')
+#    plot_pca_over_training(training_run, 'joint', 'Joint Normalized States', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_24.png')
+#
+#    plot_raw_over_training(training_run, 'joint', 'Joint Normalized States', intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_25.png')
+#
+#    plot_pca_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_20.png')
+#    plot_pca_fixed_points_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_21.png')
+#    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_22.png')
 
     plt.show()

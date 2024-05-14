@@ -11,7 +11,7 @@ DEFAULT_CFG = {
     'amplitude': 1.
 }
 
-def generate(cfg = DEFAULT_CFG, debug = False):
+def generate(cfg = DEFAULT_CFG, debug = False, noise = True):
     # Inputs are 3 dimensional of format,
     # [fixation, stim1 cos, stim1 sin].
     # Fixation tells us when to output and stim1 is what to copy.
@@ -21,7 +21,7 @@ def generate(cfg = DEFAULT_CFG, debug = False):
     memory_start = cfg["T_stim"] 
     response_start = memory_start + cfg["T_memory"]
     
-    # Generate input data.
+    # Generate data.
     inp = torch.zeros((cfg["n_samples"], T, D))
     target = torch.zeros_like(inp)
 
@@ -50,14 +50,14 @@ def generate(cfg = DEFAULT_CFG, debug = False):
                 plt.axvline(response_start, c = 'black', alpha = .5, linewidth = 3, linestyle = 'dashed')
                 plt.ylim(-1.2, 1.2)
             plt.suptitle('Input Left, Target Right')
-        plt.show()
 
 
     # TODO vary durations.
 
     # Add noise to inputs.
-    with torch.no_grad():
-        inp += torch.normal(torch.zeros_like(inp), 1.) * .1 * (2 ** .5)
+    if noise:
+        with torch.no_grad():
+            inp += torch.normal(torch.zeros_like(inp), 1.) * .1 * (2 ** .5)
     return inp, target
 
 def accuracy(X, Y):
