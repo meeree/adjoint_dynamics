@@ -16,7 +16,7 @@ def adjoint_calculate(t, y, func, method, tol, user_adjoint = None):
         ##################################
 
         # [-1] because y and grad_y are both of shape (len(t), *y0.shape)
-        aug_state = [torch.zeros((), dtype=y.dtype, device=y.device), y[-1], grad_y[-1]]  # vjp_t, y, vjp_y
+        aug_state = [torch.zeros((), dtype=y.dtype, device=y.device), y[:, -1], grad_y[:, -1]]  # vjp_t, y, vjp_y
         aug_state.extend([torch.zeros_like(param) for param in adjoint_params])  # vjp_params
 
         ##################################
@@ -73,8 +73,8 @@ def adjoint_calculate(t, y, func, method, tol, user_adjoint = None):
                 rtol=adjoint_rtol, atol=adjoint_atol, method=adjoint_method
             )
             aug_state = [a[1] for a in aug_state]  # extract just the t[i - 1] value
-            aug_state[1] = y[i - 1]  # update to use our forward-pass estimate of the state
-            aug_state[2] += grad_y[i - 1]  # update any gradients wrt state at this time point
+            aug_state[1] = y[:, i - 1]  # update to use our forward-pass estimate of the state
+            aug_state[2] += grad_y[:, i - 1]  # update any gradients wrt state at this time point
             record.append(aug_state)
 
     return record
@@ -89,7 +89,7 @@ def adjoint_calculate_RNN(t, y, func, grad_y, user_adjoint = None):
         ##################################
 
         # [-1] because y and grad_y are both of shape (len(t), *y0.shape)
-        aug_state = [torch.zeros((), dtype=y.dtype, device=y.device), y[-1], grad_y[-1]]  # vjp_t, y, vjp_y
+        aug_state = [torch.zeros((), dtype=y.dtype, device=y.device), y[:, -1], grad_y[:, -1]]  # vjp_t, y, vjp_y
         aug_state.extend([torch.zeros_like(param) for param in adjoint_params])  # vjp_params
 
         ##################################
@@ -147,8 +147,8 @@ def adjoint_calculate_RNN(t, y, func, grad_y, user_adjoint = None):
             # In RNN CASE, no odeint involved!
             aug_state = augmented_dynamics(t[i], tuple(aug_state))
             aug_state = list(aug_state)
-            aug_state[1] = y[i - 1]  # update to use our forward-pass estimate of the state
-            aug_state[2] += grad_y[i - 1]  # For accumulation task where loss involves every timestep, we need to add dL/dz(t) contribution from the straight loss to the term. For mean task, this is just 1/timesteps.
+            aug_state[1] = y[:, i - 1]  # update to use our forward-pass estimate of the state
+            aug_state[2] += grad_y[:, i - 1]  # For accumulation task where loss involves every timestep, we need to add dL/dz(t) contribution from the straight loss to the term. For mean task, this is just 1/timesteps.
             record.append(aug_state)
 
     return record

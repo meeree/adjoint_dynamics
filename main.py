@@ -3,6 +3,7 @@ from adjoint_calculation import adjoint_calculate, adjoint_calculate_RNN
 from torchdiffeq import odeint, odeint_adjoint
 from tqdm import tqdm
 import numpy as np
+import scipy as sp
 import torch
 from torch import nn
 import matplotlib.pyplot as plt
@@ -29,6 +30,7 @@ parser.add_argument('--retrain', type=bool, default=False)
 parser.add_argument('--repca', type=bool, default=False)
 parser.add_argument('--task', type=str, default='memory_pro')
 parser.add_argument('--analyze_best', type=bool, default=False)
+parser.add_argument('--terminal_loss', type=bool, default=False)
 args = parser.parse_args()
 device = 'cpu'
 if args.task == 'memory_pro':
@@ -37,6 +39,8 @@ elif args.task == 'category_pro':
     import category_pro as task
 elif args.task == 'mix_mem_cat':
     import memory_category_mix as task
+elif args.task == 'single_fp':
+    import single_fp_task as task
 
 class Model(nn.Module):
     ''' The model in this case is just an RNN (hand built). '''
@@ -126,6 +130,11 @@ def ping_dir(directory, clear = False):
     else:
         os.mkdir(directory)
 
+def compute_loss(loss_fn, out, target):
+    if args.terminal_loss:
+        return loss_fn(out[:, -1:, :], target[:, -1:, :])
+    return loss_fn(out, target)
+
 def train(root_dir, plot = True):
     # Load the data and model.
 
@@ -152,7 +161,7 @@ def train(root_dir, plot = True):
         batch, target = next(iter(dloader))
         batch, target = batch.cuda(), target.cuda()
         out, hidden = model.evaluate(batch)
-        loss = loss_fn(out[:, :, :], target[:, :, :])
+        loss = compute_loss(loss_fn, out, target)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optim.step()
@@ -177,7 +186,7 @@ def train(root_dir, plot = True):
     if plot:
         plt.figure()
         plt.subplot(1,2,1)
-        losses_avg = np.convolve(losses, np.ones(20)/20., mode='same')
+        losses_avg = np.convolve(losses, np.ones(20)/20., mode='valid')
         plt.plot(losses)
         plt.plot(losses_avg)
         plt.title('Training Loss') 
@@ -185,7 +194,7 @@ def train(root_dir, plot = True):
         plt.xlabel('Iteration')
 
         plt.subplot(1,2,2)
-        accs_avg = np.convolve(accs, np.ones(20)/20., mode='same')
+        accs_avg = np.convolve(accs, np.ones(20)/20., mode='valid')
         plt.plot(accs)
         plt.plot(accs_avg)
         plt.title('Training Acccuracy') 
@@ -213,7 +222,7 @@ def plot_example_single_trial(checkpoint):
         with torch.enable_grad():
             true_s, out = ode.evaluate(X, grad_record=True)
             loss_fn = nn.MSELoss()
-            loss = loss_fn(out, Y)
+            loss = compute_loss(loss_fn, out, Y)
             grad_s = torch.autograd.grad(loss, true_s)[0]
 
         # Measure adjoints and state over time and record everything.
@@ -268,119 +277,170 @@ def analyze_over_training(checkpoints, iteration, save_raw = False, debug = Fals
             ode.set_x(X)
             with torch.enable_grad():
                 true_s, out = ode.evaluate(X, grad_record=True)
-                loss_fn = nn.MSELoss()
-                loss = loss_fn(out, Y)
+                loss_fn = nn.MSELoss(reduction = 'none')
+                loss_unreduced = compute_loss(loss_fn, out, Y)
+                loss_over_time = loss_unreduced.mean(-1).transpose(0,1)
+                loss = loss_unreduced.mean()
                 grad_s = torch.autograd.grad(loss, true_s, retain_graph=True)[0]
 
-            # Measure adjoints and state over time and record everything.
-            data = adjoint_calculate_RNN(t, true_s, ode, grad_s)
+#            # Measure adjoints and state over time and record everything.
+#            data = adjoint_calculate_RNN(t, true_s, ode, grad_s)
+#
+#            # Outer product approach.
+#            z = np.array([v[1].detach().numpy() for v in data])[::-1]
+#            a = np.array([v[2].detach().numpy() for v in data])[::-1]
+#            adjoint_sigma_prime = (1 - z**2) * a # ASSUMES TANH ACTIVATION (I.E sig' = (1-sig**2)). 
+#            adjoint_sigma_prime = adjoint_sigma_prime[1:]
 
-            # Outer product approach.
-            z = np.array([v[1].detach().numpy() for v in data])[::-1]
-            a = np.array([v[2].detach().numpy() for v in data])[::-1]
-            adjoint_sigma_prime = (1 - z[1:]**2) * a[1:] # ASSUMES TANH ACTIVATION (I.E sig' = (1-sig**2)). 
-
-            if debug: # Validate the computed gradient is correct for the W parameter. Could validate others, but any should be good.
-                loss.backward() # Get the gradients with autograd.
-                w_grad_true = ode.W.grad.numpy()
-                w_grad_mine = data[-1][6].detach().numpy()
-
-                g_W = np.zeros((z.shape[1], z.shape[2], z.shape[2])) # [B, N, N].
-                g_W_record = np.zeros((len(t), *g_W.shape))
-                for i in range(z.shape[0]-2, -1, -1):
-                    # Batched outer product.
-                    dot_g = -np.einsum('ij,ik->ijk', z[i], adjoint_sigma_prime[i]) 
-                    g_W = g_W - dot_g # Timestep of length 1.
-                    g_W_record[i] = np.copy(g_W)
-                w_grad_outer = np.sum(g_W, 0)
-
-#                plt.figure(figsize=(9,3))
-#                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+            plt.plot(X[0, :], c = 'green')
+            plt.plot(out[0, :], c = [itr / iteration[-1], 0., 0.])
+#
+#            for b in range(1):
+#                a_T = grad_s[b, -1].detach().cpu().numpy()
+#
+#                W = ode.W.detach().cpu().numpy()
+#                W_inv = np.linalg.inv(W)
+#
+#                tau = z.shape[0] # Timesteps
+#                guess_a = np.zeros_like(a[:, b])
+#                print(sp.linalg.expm(W * (tau - 0)).shape, a_T.shape)
+#                for tidx in range(tau):
+#                    guess_a[tidx] = sp.linalg.expm(W * (tau - tidx)).dot(a_T)
+#                print(np.linalg.eigvals(W))
+#                print(z.shape)
+##                plt.subplot(1,2,1)
+#                plt.plot(guess_a[::-1] / (10 * 100 * 30 * 100), c = 'black', alpha = .5)
+##                plt.subplot(1,2,2)
+#                plt.plot(a[:, b], c = 'red', alpha = .5)
+#
+#                sigma_prime = (1 - z[-1,b]**2) 
+#                res = np.outer(W_inv.dot(np.eye(W.shape[0]) - sp.linalg.expm(W * tau)).dot(a_T * sigma_prime), z[-1,b])
+#
+#                w_grad_mine = data[-1][6].detach().numpy()
+#
+#                plt.figure()
 #                plt.subplot(1,3,1)
-#                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
-#                plt.title('Pytorch based $\\nabla_W Loss$')
+#                plt.imshow(res)
+#
 #                plt.subplot(1,3,2)
-#                plt.imshow(w_grad_mine, vmin = vmin, vmax = vmax)
-#                plt.title('Adjoint based $\\nabla_W Loss = g_W(0)$')
+#                plt.imshow(w_grad_mine)
+#
 #                plt.subplot(1,3,3)
+#                plt.imshow(w_grad_mine.T)
+#
+#                plt.show()
+#                print(res.shape)
+#                plt.plot(res[:, :], c = 'black')
+#            plt.show()
+#            asjdoias
+#
+#
+#            if debug: # Validate the computed gradient is correct for the W parameter. Could validate others, but any should be good.
+#                loss.backward() # Get the gradients with autograd.
+#                w_grad_true = ode.W.grad.numpy()
+#                w_grad_mine = data[-1][6].detach().numpy()
+#
+#                g_W = np.zeros((z.shape[1], z.shape[2], z.shape[2])) # [B, N, N].
+#                g_W_record = np.zeros((len(t), *g_W.shape))
+#                for i in range(z.shape[0]-2, -1, -1):
+#                    # Batched outer product.
+#                    dot_g = -np.einsum('ij,ik->ijk', z[i], adjoint_sigma_prime[i]) 
+#                    g_W = g_W - dot_g # Timestep of length 1.
+#                    g_W_record[i] = np.copy(g_W)
+#                w_grad_outer = np.sum(g_W, 0)
+#
+##                plt.figure(figsize=(9,3))
+##                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+##                plt.subplot(1,3,1)
+##                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
+##                plt.title('Pytorch based $\\nabla_W Loss$')
+##                plt.subplot(1,3,2)
+##                plt.imshow(w_grad_mine, vmin = vmin, vmax = vmax)
+##                plt.title('Adjoint based $\\nabla_W Loss = g_W(0)$')
+##                plt.subplot(1,3,3)
+##                plt.imshow(w_grad_true - w_grad_mine, vmin = vmin, vmax = vmax)
+##                plt.title('Error, True - Mine')
+##                plt.suptitle('Validating Runninng Gradient. Same Color Scale for all.')
+##                plt.savefig('Validated_Grad.pdf')
+##                plt.show()
+#                plt.figure(figsize=(12,3))
+#                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+#                plt.subplot(1,4,1)
+#                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
+#                plt.colorbar()
+#                plt.title('Pytorch Based $\\nabla_W Loss$')
+#                plt.subplot(1,4,2)
+#                plt.imshow(w_grad_mine)
+#                plt.colorbar()
+#                plt.title('Adjoint Based $\\nabla_W Loss = g_W(0)$')
+#                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
+#                plt.subplot(1,4,3)
+#                plt.imshow(w_grad_outer, vmin = vmin, vmax = vmax)
+#                plt.colorbar()
+#                plt.title('Adjoint Outer Product Based')
+#                plt.subplot(1,4,4)
 #                plt.imshow(w_grad_true - w_grad_mine, vmin = vmin, vmax = vmax)
 #                plt.title('Error, True - Mine')
 #                plt.suptitle('Validating Runninng Gradient. Same Color Scale for all.')
 #                plt.savefig('Validated_Grad.pdf')
 #                plt.show()
-                plt.figure(figsize=(12,3))
-                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
-                plt.subplot(1,4,1)
-                plt.imshow(w_grad_true, vmin = vmin, vmax = vmax)
-                plt.colorbar()
-                plt.title('Pytorch Based $\\nabla_W Loss$')
-                plt.subplot(1,4,2)
-                plt.imshow(w_grad_mine)
-                plt.colorbar()
-                plt.title('Adjoint Based $\\nabla_W Loss = g_W(0)$')
-                vmin, vmax = min(np.min(w_grad_true), np.min(w_grad_mine)), max(np.max(w_grad_true), np.max(w_grad_mine))
-                plt.subplot(1,4,3)
-                plt.imshow(w_grad_outer, vmin = vmin, vmax = vmax)
-                plt.colorbar()
-                plt.title('Adjoint Outer Product Based')
-                plt.subplot(1,4,4)
-                plt.imshow(w_grad_true - w_grad_mine, vmin = vmin, vmax = vmax)
-                plt.title('Error, True - Mine')
-                plt.suptitle('Validating Runninng Gradient. Same Color Scale for all.')
-                plt.savefig('Validated_Grad.pdf')
-                plt.show()
-
-            # TODO: MAKE THIS CLEANER. ESSENTIALLY, to get grad for parameters, we need to pass in each individual data point and concat results ;(.
-#            for param_idx in [3, 6]:
-#                for idx in range(len(data)):
-#                    data[idx][param_idx] = torch.empty((0, *data[idx][param_idx].shape))
 #
-#                count = 50 if param_idx == 3 else 25 
-#                for b in range(count): # Just do a couple data samples since things can get slow and big quick...
-#                    X_sub, Y_sub = X[b:b+1], Y[b:b+1]
-#                    ode.set_x(X_sub)
-#                    with torch.enable_grad():
-#                        true_s_sub, out_sub = ode.evaluate(X_sub, grad_record=True)
-#                        loss_sub = loss_fn(out_sub, Y_sub)
-#                        grad_s_sub = torch.autograd.grad(loss_sub, true_s_sub)[0]
+#            # TODO: MAKE THIS CLEANER. ESSENTIALLY, to get grad for parameters, we need to pass in each individual data point and concat results ;(.
+##            for param_idx in [3, 6]:
+##                for idx in range(len(data)):
+##                    data[idx][param_idx] = torch.empty((0, *data[idx][param_idx].shape))
+##
+##                count = 50 if param_idx == 3 else 25 
+##                for b in range(count): # Just do a couple data samples since things can get slow and big quick...
+##                    X_sub, Y_sub = X[b:b+1], Y[b:b+1]
+##                    ode.set_x(X_sub)
+##                    with torch.enable_grad():
+##                        true_s_sub, out_sub = ode.evaluate(X_sub, grad_record=True)
+##                        loss_sub = loss_fn(out_sub, Y_sub)
+##                        grad_s_sub = torch.autograd.grad(loss_sub, true_s_sub)[0]
+##
+##                    # Measure adjoints and set_zlimstate over time and record everything.
+##                    data_sub = adjoint_calculate_RNN(t, true_s_sub, ode, grad_s_sub)
+##                    for idx in range(len(data)):
+##                        data[idx][param_idx] = torch.concatenate([data[idx][param_idx], data_sub[idx][param_idx].unsqueeze(0)])
 #
-#                    # Measure adjoints and set_zlimstate over time and record everything.
-#                    data_sub = adjoint_calculate_RNN(t, true_s_sub, ode, grad_s_sub)
-#                    for idx in range(len(data)):
-#                        data[idx][param_idx] = torch.concatenate([data[idx][param_idx], data_sub[idx][param_idx].unsqueeze(0)])
+#            # Calculate the scale of the two terms contributing to the gradient.
+#            g1 = 2 / float(out.nelement()) * torch.matmul(out, ode.Wout.transpose(0,1))
+#            g2 = 2 / float(out.nelement()) * torch.matmul(-Y, ode.Wout.transpose(0,1))
+#            record['g1'] = torch.mean(g1.norm(dim=1)).item() # Mean of norm over time.
+#            record['g2'] = torch.mean(g2.norm(dim=1)).item()
+#            record['loss'] = loss.item()
+#
+#            vel = z[1:] - z[:-1] # f(x) - x.
+#            
+##            plt.plot(t[:-1], (vel * a[:-1]).sum(-1) + loss_over_time[:-1].detach().numpy(), label = f'h_{itr}', color = [itr / iteration[-1], 0., 0.])
+#            record['hamiltonian_raw'] = (vel * a[:-1]).sum(-1) + loss_over_time[:-1].detach().numpy()
+#
+#            normalize_fn = lambda x: (x - x.min()) / (x.max() - x.min())
+#
+#            joint = np.concatenate([normalize_fn(z), normalize_fn(a)], -1)
+#            inds = [1, 2, 3, 6, 1, 1]
+#            names = ['state', 'adjoint', 'win_grad', 'w_grad', 'adjoint_sigma_prime', 'joint']
+#            for ind, name in zip(inds, names):
+#                states = np.array([a[ind].detach().numpy() for a in data])[::-1] # reverse time.
+#                if name == 'adjoint_sigma_prime':
+#                    states = adjoint_sigma_prime
+#                if name == 'joint':
+#                    states = joint 
+#
+#                if save_raw:
+#                    record[f'{name}_raw'] = states
+#
+#                # NOTE: Different PCA per iteration! See function below to do same PCA for all.
+#                pca, s = compute_pca(states.reshape(states.shape[0] * states.shape[1], -1))
+#                s = s.reshape((states.shape[0], states.shape[1], -1)) # shape (tsteps, batch, projection components).
+#                record[f'{name}_pca'] = s
+#                record[f'{name}_pca_struct'] = pca
+#
+#            records_all.append(record)
 
-            # Calculate the scale of the two terms contributing to the gradient.
-            g1 = 2 / float(out.nelement()) * torch.matmul(out, ode.Wout.transpose(0,1))
-            g2 = 2 / float(out.nelement()) * torch.matmul(-Y, ode.Wout.transpose(0,1))
-            record['g1'] = torch.mean(g1.norm(dim=1)).item() # Mean of norm over time.
-            record['g2'] = torch.mean(g2.norm(dim=1)).item()
-            record['loss'] = loss.item()
-
-            vel = z[1:] - z[:-1] # f(x) - x.
-            plt.plot(t[:-1], (vel * a[:-1]).sum(-1), label = f'h_{itr}', color = [itr / iteration[-1], 0., 0.])
-
-            normalize_fn = lambda x: (x - x.min()) / (x.max() - x.min())
-
-            joint = np.concatenate([normalize_fn(z), normalize_fn(a)], -1)
-            inds = [1, 2, 3, 6, 1, 1]
-            names = ['state', 'adjoint', 'win_grad', 'w_grad', 'adjoint_sigma_prime', 'joint']
-            for ind, name in zip(inds, names):
-                states = np.array([a[ind].detach().numpy() for a in data])[::-1] # reverse time.
-                if name == 'adjoint_sigma_prime':
-                    states = adjoint_sigma_prime
-                if name == 'joint':
-                    states = joint 
-
-                if save_raw:
-                    record[f'{name}_raw'] = states
-
-                # NOTE: Different PCA per iteration! See function below to do same PCA for all.
-                pca, s = compute_pca(states.reshape(states.shape[0] * states.shape[1], -1))
-                s = s.reshape((states.shape[0], states.shape[1], -1)) # shape (tsteps, batch, projection components).
-                record[f'{name}_pca'] = s
-                record[f'{name}_pca_struct'] = pca
-
-            records_all.append(record)
+    plt.legend(['Input', 'Output, black->red over training'])
+    plt.show()
 
 #    plt.title('Hamiltonian')
 #    plt.xlabel('Time')
@@ -433,12 +493,14 @@ def plot_raw_over_training_multitrial(records, quantity_name, display_name, inte
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1)
         s = record[f'{quantity_name}_raw']
+        s = s[1:] - s[:-1] 
+        for off in intervals:
+            plt.axvline(off, linewidth = 3, alpha = .4, zorder = -1, color = 'black')
+
         for trial_idx in trial_inds:
             color = plt.rcParams['axes.prop_cycle'].by_key()['color'][trial_idx % 10] # Default matplotlib colors.
-            for style, off1, off2 in zip(['-', 'dashed', 'dotted'], intervals[:-1], intervals[1:]):
-                end = min(off2+1, s.shape[0])
-                sub = s[off1:end, trial_idx] # Only plot one trial.
-                ax.plot(np.arange(off1, end), sub, alpha = 0.5, linestyle = style, c = color)
+            sub = s[:, trial_idx] # Only plot one trial.
+            ax.plot(sub, alpha = 0.5, c = color)
 
         ax.set_xlabel('Time Step')
         plt.title(f'Iteration {record["iteration"]}')
@@ -449,7 +511,7 @@ def plot_pca_over_training(records, quantity_name, display_name, intervals):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
-        ax.view_init(azim=0, elev=90)
+        ax.view_init(azim=0, elev=0)
         s = record[f'{quantity_name}_pca']
         for color, off1, off2 in zip(COLORS, intervals[:-1], intervals[1:]):
             sub = s[off1:off2+1]
@@ -478,7 +540,8 @@ def plot_pca_fixed_points_over_training(records, quantity_name, display_name, in
         ax = fig.add_subplot(M, N, plot_idx + 1, projection='3d')
         s = record[f'{quantity_name}_pca']
         for color, off in zip(colors, intervals):
-            ax.scatter(s[off, :, 0], s[off, :, 1], s[off, :, 2], c = color, alpha = 0.7, marker='^', s = .4)
+            idx = min(off, s.shape[0]-1)
+            ax.scatter(s[idx, :, 0], s[idx, :, 1], s[idx, :, 2], c = color, alpha = 0.7, marker='^', s = .4)
 
         # Consistent scaling of all axes. If a PC has a very small scale, we don't really care about it! 
 #        min_dim, max_dim = np.min(s), np.max(s)
@@ -500,12 +563,11 @@ def plot_hamiltonian_over_training(records, intervals, trial_idx = 0):
     fig, M, N = make_grid_fig(records)
     for plot_idx, record in enumerate(records):
         ax = fig.add_subplot(M, N, plot_idx + 1)
-        s, adj = record[f'state_raw'], record[f'adjoint_raw']
-        vel = s[1:] - s[:-1]
-        H = (adj[:-1] * vel).sum(-1) # Dot product.
+        H = record[f'hamiltonian_raw']
         for color, off1, off2 in zip(COLORS, intervals[:-1], intervals[1:]):
-            sub_H = H[off1:off2+1, :]
-            ax.plot(range(off1, off2+1), sub_H, c = color, alpha = 0.5) 
+            end = min(off2+1, H.shape[0])
+            sub_H = H[off1:end, :]
+            ax.plot(range(off1, end), sub_H, c = color, alpha = 0.5) 
         ax.set_xlabel(f'Time Step')
         ax.set_ylabel(f'Hamiltonian')
         plt.title(f'Iteration {record["iteration"]}')
@@ -513,10 +575,42 @@ def plot_hamiltonian_over_training(records, intervals, trial_idx = 0):
     plt.suptitle(f'Hamiltonian Over Training. All Trials.')
     plt.tight_layout()
 
+def plot_hamiltonian_means_over_training(records, intervals, trial_idx = 0):
+    ''' Plot hamiltonian space comparing adjoint and forward state over training iterations. '''
+    fig, M, N = make_grid_fig(records)
+    ax = fig.add_subplot(1,1,1)
+    for plot_idx, record in enumerate(records):
+        H = record[f'hamiltonian_raw']
+        H = H.mean(-1)
+        color = [plot_idx / (len(records)-1.), 0., 0.]
+        for style, off1, off2 in zip(['-', 'dashed', 'dotted'], intervals[:-1], intervals[1:]):
+            end = min(off2+1, H.shape[0])
+            sub_H = H[off1:end]
+            ax.plot(range(off1, end), sub_H, c = color, alpha = 0.5, linestyle = style) 
+
+    ax.set_xlabel(f'Time Step')
+    ax.set_ylabel(f'Hamiltonian')
+
+    plt.suptitle(f'Hamiltonian Over Training. All Trials.')
+    plt.tight_layout()
+
 if __name__ == "__main__":
     root = args.task + '/'
+#    root = root[:-1] + '_times_4_init/'
     ping_dir(root)
     print(f'Root Directory {root}')
+
+
+#    # Adjoint analysis with different initializations.
+#    scales = 10**np.linspace(0., 0.9, 10)
+#    ping_dir(root + 'scale_checkpoints/')
+#    models = []
+#    for scale in scales:
+#        model = ModelRNN(args.n_hidden, 3, 3)
+#        for param in model.parameters():
+#            with torch.no_grad():
+#                param *= scale
+#        torch.save({'model': model.state_dict()}, root + f'scale_checkpoints/checkpoint_{scale}.pt')
 
     if args.retrain:
         ping_dir(root + 'checkpoints', clear = True)
@@ -527,23 +621,24 @@ if __name__ == "__main__":
     files = sorted(files, key=lambda x: int(re.findall(r'\d+', x)[0]))
     iteration = [int(re.findall(r'\d+', file)[0]) for file in files]
     files = [root + 'checkpoints/' + os.path.basename(p) for p in files]
+#    iteration = scales
 
     if args.analyze_best:
         analyze_model_old(files[-1])
 
     if args.repca:
         training_run = analyze_over_training_SAME_PCA(files, iteration)
-        with open(root + 'training_run_SAME_PCA_.pt', "wb") as fp:
+        with open(root + 'training_run_SAME_PCA.pt', "wb") as fp:
             pickle.dump(training_run, fp)
 
-    with open(root + 'training_run_SAME_PCA_.pt', "rb") as fp:
+    with open(root + 'training_run_SAME_PCA.pt', "rb") as fp:
         training_run = pickle.load(fp)
 
     intervals = [0, 30, 60, 90] 
     if args.task == 'mem_cat_mix':
         intervals += ['120'] # Extra context interval.
 
-    save_dir = root + 'May_14/' # CUSTOMIZE.
+    save_dir = root + 'May_21/' # CUSTOMIZE.
     ping_dir(save_dir)
 
     # Plot loss on task.
@@ -552,68 +647,65 @@ if __name__ == "__main__":
     plt.title('Train Loss')
     plt.savefig(save_dir + 'Loss.png')
 
-    # Terms contributing to adjoint.
-    plt.figure()
-    plt.plot(iteration, [record['g1'] for record in training_run], color = "#ffab40", linewidth=4)
-    plt.plot(iteration, [record['g2'] for record in training_run], color = "#c27ba0", linewidth=4)
-    plt.xlabel('Training Iteration')
-    plt.legend(['Term 1 Norm', 'Term 2 Norm'])
-    plt.savefig(save_dir + 'Terms.png')
-
-    # Just to illustrate the task on a single trial.
-    plot_example_single_trial(files[-1])
-    plt.savefig(save_dir + 'Figure_Single_Trial.pdf')
-
-#    training_run = training_run[:18:2] # Subset for plots.
+#    # Terms contributing to adjoint.
+#    plt.figure()
+#    plt.plot(iteration, [record['g1'] for record in training_run], color = "#ffab40", linewidth=4)
+#    plt.plot(iteration, [record['g2'] for record in training_run], color = "#c27ba0", linewidth=4)
+#    plt.xlabel('Training Iteration')
+#    plt.legend(['Term 1 Norm', 'Term 2 Norm'])
+#    plt.savefig(save_dir + 'Terms.png')
+#
+#    # Just to illustrate the task on a single trial.
+#    plot_example_single_trial(files[-1])
+#    plt.savefig(save_dir + 'Figure_Single_Trial.pdf')
+#
+##    training_run = training_run[:18:2] # Subset for plots.
     training_run = training_run[:9] # Subset for plots.
-
-    # Analyze PCA over training.
-    ping_dir(save_dir + 'pca_plots/')
-
-    plot_pca_over_training(training_run[0:1], 'state', 'Hidden States', intervals = intervals)
-    plot_pca_over_training(training_run[-1:], 'state', 'Hidden States', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/TrainingEndHidden.png')
-    plot_pca_over_training(training_run[0:1], 'adjoint', 'Adjoint', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/TrainingStartAdjoint.png')
-    plot_pca_over_training(training_run[-1:], 'adjoint', 'Adjoint', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/TrainingEndAdjoint.png')
-    plt.show()
-
-    plot_pca_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
+#
+#    # Analyze PCA over training.
+#    ping_dir(save_dir + 'pca_plots/')
+#
+#    plot_pca_over_training(training_run[0:1], 'state', 'Hidden States', intervals = intervals)
+#    plot_pca_over_training(training_run[-1:], 'state', 'Hidden States', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/TrainingEndHidden.png')
+#    plot_pca_over_training(training_run[0:1], 'adjoint', 'Adjoint', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/TrainingStartAdjoint.png')
+#    plot_pca_over_training(training_run[-1:], 'adjoint', 'Adjoint', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/TrainingEndAdjoint.png')
+#
+#    plot_pca_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_1.png')
     plot_pca_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
     plt.savefig(save_dir + 'pca_plots/Figure_2.png')
-    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_3.png')
-    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_4.png')
-
-    # Analyze PCA fixed points over training.
-    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_10.png')
-    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_11.png')
-    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_12.png')
-    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
-    plt.savefig(save_dir + 'pca_plots/Figure_13.png')
+    plt.show()
+#    plot_pca_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_3.png')
+#    plot_pca_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_4.png')
+#
+#    # Analyze PCA fixed points over training.
+#    plot_pca_fixed_points_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_10.png')
+#    plot_pca_fixed_points_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_11.png')
+#    plot_pca_fixed_points_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_12.png')
+#    plot_pca_fixed_points_over_training(training_run, 'w_grad', 'Running $W$ Gradient', intervals = intervals)
+#    plt.savefig(save_dir + 'pca_plots/Figure_13.png')
 
     # Analyze raw hidden state and adjoint (no PCA) over training.
     ping_dir(save_dir + 'raw_plots/')
-    plot_raw_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_13.png')
-    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_14.png')
-    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_18.png')
+#    plot_raw_over_training(training_run, 'state', 'Hidden States', intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_13.png')
+#    plot_raw_over_training(training_run, 'adjoint', 'Adjoint', intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_14.png')
+#    plot_raw_over_training(training_run, 'win_grad', 'Running $W_{in}$ Gradient', intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_18.png')
 
-    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States', intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_15.png')
-    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint', intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_16.png')
-
-    plot_hamiltonian_over_training(training_run, intervals = intervals)
-    plt.savefig(save_dir + 'raw_plots/Figure_23.png')
+    plot_raw_over_training_multitrial(training_run, 'state', 'Hidden States Velocity', intervals = intervals)
+    plt.savefig(save_dir + 'raw_plots/Figure_30.png')
+    plot_raw_over_training_multitrial(training_run, 'adjoint', 'Adjoint Velocity', intervals = intervals)
+    plt.savefig(save_dir + 'raw_plots/Figure_29.png')
 
 #    plot_pca_over_training(training_run, 'joint', 'Joint Normalized States', intervals = intervals)
 #    plt.savefig(save_dir + 'pca_plots/Figure_24.png')
@@ -627,5 +719,11 @@ if __name__ == "__main__":
 #    plt.savefig(save_dir + 'pca_plots/Figure_21.png')
 #    plot_raw_over_training(training_run, 'adjoint_sigma_prime', 'Adjoint Sigma Prime', intervals = intervals)
 #    plt.savefig(save_dir + 'pca_plots/Figure_22.png')
+
+#    plot_hamiltonian_means_over_training(training_run, intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_28.png')
+
+#    plot_hamiltonian_over_training(training_run, intervals = intervals)
+#    plt.savefig(save_dir + 'raw_plots/Figure_23.png')
 
     plt.show()
