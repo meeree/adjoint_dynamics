@@ -99,7 +99,7 @@ def adjoint_calculate_RNN(t, y, func, grad_y, user_adjoint = None):
         def augmented_dynamics(t, y_aug):
             # Dynamics of the original system augmented with
             # the adjoint wrt y, and an integrator wrt t and args.
-            y = y_aug[1]
+            y_prev = 0. * y_aug[1] if t <= 0 else y[:, int(t)-1] # We want flow from time t-1 to t, not t to t+1. ASSUME initial condition of flow is zero!
             adj_y = y_aug[2]
             # ignore gradients wrt time and parameters
 
@@ -109,21 +109,21 @@ def adjoint_calculate_RNN(t, y, func, grad_y, user_adjoint = None):
             with torch.enable_grad():
                 t_ = t.detach()
                 t = t_.requires_grad_(True)
-                y = y.detach().requires_grad_(True)
+                y_prev = y_prev.detach().requires_grad_(True)
 
                 # Evaluate f(z).
-                func_eval = func(t, y)
+                func_eval = func(t, y_prev)
 
                 # a(t) = Df_z^T * a(t+1). Note no minus sign for RNN update!
                 # Nicely, autograd.grad computes the Jacobians then products them in one step (third parameter adj_y).
                 vjp_t, vjp_y, *vjp_params = torch.autograd.grad(
-                    func_eval, (t, y) + adjoint_params, adj_y,
+                    func_eval, (t, y_prev) + adjoint_params, adj_y,
                     allow_unused=True, retain_graph=True
                 )
 
             # autograd.grad returns None if no gradient, set to zero.
             vjp_t = torch.zeros_like(t) if vjp_t is None else vjp_t
-            vjp_y = torch.zeros_like(y) if vjp_y is None else vjp_y
+            vjp_y = torch.zeros_like(y_prev) if vjp_y is None else vjp_y
             vjp_params = [torch.zeros_like(param) if vjp_param is None else vjp_param
                           for param, vjp_param in zip(adjoint_params, vjp_params)]
 
@@ -147,8 +147,8 @@ def adjoint_calculate_RNN(t, y, func, grad_y, user_adjoint = None):
             # In RNN CASE, no odeint involved!
             aug_state = augmented_dynamics(t[i], tuple(aug_state))
             aug_state = list(aug_state)
-            aug_state[1] = y[:, i - 1]  # update to use our forward-pass estimate of the state
-            aug_state[2] += grad_y[:, i - 1]  # For accumulation task where loss involves every timestep, we need to add dL/dz(t) contribution from the straight loss to the term. For mean task, this is just 1/timesteps.
+            aug_state[1] = y[:, i-1]  # update to use our forward-pass estimate of the state
+            aug_state[2] += grad_y[:, i-1]  # For accumulation task where loss involves every timestep, we need to add dL/dz(t) contribution from the straight loss to the term. In paper this is ∇_{z(t)} ℓ(z(t))
             record.append(aug_state)
 
     return record
