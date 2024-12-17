@@ -64,3 +64,38 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda'):
     if not compute_adj:
         return np.stack(zs_all)
     return np.stack(zs_all), np.stack(adjs_all), np.stack(losses_all)
+
+def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6):
+    # Get the covariance and principle components for data over checkpoints (D), batches (B), time (T), with hidden dimension (H). 
+    # traj is shape [D, B, T, H]. D is trials, B is baches (what we mean over), T is time, H is hidden index.
+    # If traj2 is not None, we take cross covariances, assuming traj2 has the same shape.
+    centered = traj - traj.mean(1)[:, None]
+    if traj2 is not None:
+        centered2 = traj2 - traj2.mean(1)[:, None]
+
+    covs = np.zeros((*traj.shape[:-3], traj.shape[-2], traj.shape[-1], traj.shape[-1])) # [D, T, H, H]
+    for idx, zs in enumerate(traj):
+        for tidx, z_t in enumerate(zs.transpose(1,2,0)): # Shape [H, B]
+            if traj2 is None:
+                cov = np.cov(z_t)
+            else:
+                cov = np.mean(centered[idx, :, tidx, :, None] * centered2[idx, :, tidx, None, :], 0) # [H, H]
+            covs[idx, tidx] = cov
+
+
+    evals, pcs = np.linalg.eigh(covs) # Use symmery. Get principle components.
+    evals, pcs = evals[:, :, ::-1], pcs[:, :, :, ::-1] # Make descending order. Shapes [D, T, H], [D, T, H, H]
+    total_variances = np.sum(evals, axis = -1) # [D, T]
+    variance_ratios = np.cumsum(evals / total_variances[..., None], axis = -1)
+    dimensions = np.zeros_like(total_variances)
+    for i1 in range(variance_ratios.shape[0]):
+        for i2 in range(variance_ratios.shape[1]):
+            if total_variances[i1,i2] < abs_thresh:
+                continue
+            dim_idx = np.argwhere(variance_ratios[i1, i2] > dim_thresh)[0,0]
+            v0 = 0. if dim_idx == 0 else variance_ratios[i1, i2, dim_idx-1]
+            v1 = variance_ratios[i1, i2, dim_idx]
+            dimensions[i1, i2] = dim_idx + (dim_thresh - v0) / (v1 - v0) + 1
+
+    dimensions[total_variances < abs_thresh] = 0 # If the total variance is super low, the covariance is a point, so it doesn't make sense to use variance ratios.
+    return covs, evals, pcs, variance_ratios, dimensions
