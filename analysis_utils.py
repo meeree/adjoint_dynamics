@@ -17,7 +17,7 @@ def load_checkpoints(root):
     checkpoints = [root + 'checkpoints/' + os.path.basename(p) for p in checkpoints]
     return checkpoints, iteration
 
-def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda'):
+def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbose = True):
     # #####################################################################################################
     # Given a list of checkpoints, rerun on the same consistent data and possibly compute adjoints, etc.  |
     # Checkpoints can either be a list of file names or a list of pytorch state_dicts.                    |
@@ -34,18 +34,20 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda'):
 
     n_in, n_out = X.shape[-1], Y.shape[-1]
 
-    zs_all, adjs_all, losses_all = [], [], []
+    zs_all, adjs_all, out_all, losses_all = [], [], [], []
     to_np = lambda x: x.detach().cpu().numpy()
 
-    print("Re-evaluating on the Same Data.")
-    pbar = tqdm(list(checkpoints))
+    if verbose:
+        print("Re-evaluating on the Same Data.")
+    pbar = tqdm(list(checkpoints)) if verbose else list(checkpoints)
     for ch in pbar:
         if isinstance(ch, str):
-            pbar.set_description(ch)
+            if verbose:
+                pbar.set_description(ch)
             state_dict = torch.load(ch, map_location = device, weights_only=True)['model']
-            n_hidden = state_dict['W.weight'].shape[0]
         else:
             state_dict = ch # Assume ch IS just a state dict, not a str indicating where it should be.
+        n_hidden = state_dict['W.weight'].shape[0]
 
         with torch.set_grad_enabled(compute_adj):
             model = torch.jit.script(ModelRNNv3(n_hidden = n_hidden, n_in = n_in, n_out = n_out))
@@ -59,11 +61,14 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda'):
             zs, adj, out, loss_unreduced, loss = model.analysis_mode(inp, targ)
             zs_all.append(to_np(zs)) # [B, T, H]
             adjs_all.append(to_np(adj)) # [B, T, H]
+            out_all.append(to_np(out)) # [B, T, n_out]
             losses_all.append(to_np(loss_unreduced.mean(-1))) # [B, T].
 
     if not compute_adj:
         return np.stack(zs_all)
-    return np.stack(zs_all), np.stack(adjs_all), np.stack(losses_all)
+
+    zs_all, adjs_all, out_all, losses_all = np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all)
+    return np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all)
 
 def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6):
     # Get the covariance and principle components for data over checkpoints (D), batches (B), time (T), with hidden dimension (H). 
