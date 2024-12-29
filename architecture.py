@@ -8,7 +8,7 @@ class ModelRNNv3(nn.Module):
         self.n_out, self.n_in = n_out, n_in
         self.n_hidden = n_hidden
 
-        self.W_out = nn.Linear(n_hidden, self.n_out, bias = False)
+        self.W_out = nn.Linear(n_hidden, self.n_out, bias = True)
         self.W = nn.Linear(n_hidden, n_hidden, bias = False)
         self.W_in = nn.Linear(n_in, n_hidden, bias = False)
         self.noise_std = 0.

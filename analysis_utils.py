@@ -1,13 +1,13 @@
 # Utils for analysis of checkpoints during training. 
-import torch
 import numpy as np
+import glob, re, os
+import torch
 from tqdm import tqdm
 from architecture import ModelRNNv3
 
 def load_checkpoints(root):
-    # Given a root directoy, return a list of filenames corresponding to all checkpoints in that root directory. 
+    # Given a root directdirectoryoy, return a list of filenames corresponding to all checkpoints in that root directory. 
     # Also return iteration count for each file. Each file should be of the form root + checkpoints/checkpoint_<number>.pt.
-    import glob, re, os
     if len(root) > 0 and root[-1] != '/' and root[-1] != '\\':
         root = root + '/'
 
@@ -16,6 +16,27 @@ def load_checkpoints(root):
     iteration = [int(re.findall(r'\d+', file)[-1]) for file in checkpoints]
     checkpoints = [root + 'checkpoints/' + os.path.basename(p) for p in checkpoints]
     return checkpoints, iteration
+
+def load_sweep_checkpoints(root):
+    # Similar to load_checkpoints but for a sweep, which consists of a grid of hyperparameters. 
+    # Each sweep trial has checkpoints of the form grid_<trial_number>/checkpoints/checkpoint_<number>.pt.
+    import json 
+    if len(root) > 0 and root[-1] != '/' and root[-1] != '\\':
+        root = root + '/'
+
+    trials = glob.glob(root + 'grid_*/')
+    trials = sorted(trials, key=lambda x: int(re.findall(r'\d+', x)[-1]))
+    all_checkpoints, all_iteration = [], []
+    for trial in trials:
+        checkpoints, iteration = load_checkpoints(trial)
+        all_checkpoints.append(checkpoints)
+        all_iteration.append(iteration)
+    with open(root + 'grid_manifest.json') as fin:
+        manifest = json.load(fin)
+    return manifest, all_checkpoints, all_iteration
+
+def import_checkpoint(ch, device = 'cpu'):
+    return torch.load(ch, map_location = device, weights_only = True)
 
 def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbose = True):
     # #####################################################################################################
@@ -35,6 +56,7 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbos
     n_in, n_out = X.shape[-1], Y.shape[-1]
 
     zs_all, adjs_all, out_all, losses_all = [], [], [], []
+    grads_all = []
     to_np = lambda x: x.detach().cpu().numpy()
 
     if verbose:
@@ -63,31 +85,34 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbos
             adjs_all.append(to_np(adj)) # [B, T, H]
             out_all.append(to_np(out)) # [B, T, n_out]
             losses_all.append(to_np(loss_unreduced.mean(-1))) # [B, T].
+            grads_all.append({key: to_np(param.grad) for key, param in model.named_parameters()})
 
     if not compute_adj:
         return np.stack(zs_all)
+    return np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all), grads_all
 
-    zs_all, adjs_all, out_all, losses_all = np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all)
-    return np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all)
-
-def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6):
+def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6, normalize = True):
     # Get the covariance and principle components for data over checkpoints (D), batches (B), time (T), with hidden dimension (H). 
     # traj is shape [D, B, T, H]. D is trials, B is baches (what we mean over), T is time, H is hidden index.
     # If traj2 is not None, we take cross covariances, assuming traj2 has the same shape.
-    centered = traj - traj.mean(1)[:, None]
-    if traj2 is not None:
-        centered2 = traj2 - traj2.mean(1)[:, None]
+    D, B, T, H = traj.shape
+    if normalize: # Normalization is useful if the data scale is very small, causing issues with abs_thresh. 
+        traj = traj / np.mean(np.abs(traj))
+        if traj2 is not None:
+            traj2 = traj2 / np.mean(np.abs(traj2))
 
-    covs = np.zeros((*traj.shape[:-3], traj.shape[-2], traj.shape[-1], traj.shape[-1])) # [D, T, H, H]
-    for idx, zs in enumerate(traj):
-        for tidx, z_t in enumerate(zs.transpose(1,2,0)): # Shape [H, B]
-            if traj2 is None:
-                cov = np.cov(z_t)
-            else:
-                cov = np.mean(centered[idx, :, tidx, :, None] * centered2[idx, :, tidx, None, :], 0) # [H, H]
-            covs[idx, tidx] = cov
+    covs = []
+    if traj2 is None:
+        for zs in traj:
+            for z_t in zs.transpose(1,2,0): # Shapes [H, H], [H, B]
+                covs.append(np.cov(z_t))
+    else:
+        centered, centered2 = traj - traj.mean(1)[:, None], traj2 - traj2.mean(1)[:, None]
+        for zs, zs2 in zip(centered, centered2):
+            for z_t, z_t2 in zip(zs.transpose(1,2,0), zs2.transpose(1,2,0)):
+                covs.append(np.dot(z_t, z_t2.T) / (z_t.shape[0] - 1))
 
-
+    covs = np.stack(covs).reshape((D, T, H, H))
     evals, pcs = np.linalg.eigh(covs) # Use symmery. Get principle components.
     evals, pcs = evals[:, :, ::-1], pcs[:, :, :, ::-1] # Make descending order. Shapes [D, T, H], [D, T, H, H]
     total_variances = np.sum(evals, axis = -1) # [D, T]

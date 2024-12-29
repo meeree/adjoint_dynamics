@@ -11,7 +11,7 @@ import neurogym as ngym
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 
-def produce_plots(neurogym_root, output_root, tasks):
+def produce_plots(neurogym_root, output_root, tasks, naming_lambda = lambda task: task):
     ping_dir(output_root)
 
     # plot_spec tells us how to interpet data and what to plot.
@@ -20,6 +20,10 @@ def produce_plots(neurogym_root, output_root, tasks):
     fn3 = lambda zs_all, adjs_all: adjs_all[-2:-1]
     fn4 = lambda zs_all, adjs_all: adjs_all[:, :, -1:].swapaxes(0,2)
     plot_spec = [
+            {'traj': fn1, 'title': f'Hidden, Post Training Dynamics', 'xlabel': 'Time, t', 'smoothing': 1},
+            {'traj': fn2, 'title': f'Hidden,  Final Timestep GD flow', 'xlabel': 'GD Iteration, s', 'smoothing': 1},
+            {'traj': fn3, 'title': f'Adjoint, Post Training Dynamics', 'xlabel': 'Time, t', 'smoothing': 1},
+            {'traj': fn4, 'title': f'Adjoint,  Final Timestep GD flow', 'xlabel': 'GD Iteration, s', 'smoothing': 1},
             {'traj': fn1, 'traj2': fn3, 'title': f'Cross-Covariance, $Cov(a,z)$, Post Training Dynamics', 'xlabel': 'Time, t', 'smoothing': 1},
             {'traj': fn2, 'traj2': fn4, 'title': f'Cross-Covariance, $Cov(a,z)$,  Final Timestep GD flow', 'xlabel': 'GD Iteration, s', 'smoothing': 1},
     ]
@@ -32,7 +36,7 @@ def produce_plots(neurogym_root, output_root, tasks):
         for task_idx, task in enumerate(tqdm(tasks)):
             plt.subplot(3, 3, task_idx + 1)
             for rerun in range(5): # Rerun a couple times.
-                root = neurogym_root + task + '/'
+                root = neurogym_root + naming_lambda(task)  + '/'
                 print(f'Data root file: {root}')
 
                 checkpoints, GD_iteration = load_checkpoints(root)
@@ -84,14 +88,15 @@ def produce_plots(neurogym_root, output_root, tasks):
         plt.tight_layout()
         plt.savefig(output_root + '/dimension_plot_' + str(spec_idx+4) + '.pdf')
 
-def produce_plots_simple(neurogym_root, output_root, tasks):
+def produce_plots_simple(neurogym_root, output_root, tasks, naming_lambda = lambda task: task):
     ping_dir(output_root)
 
     dims_all = []
     plt.figure(figsize = (11, 9))
     smoothing = 1
     for task_idx, task in enumerate(tqdm(tasks)):
-        root = neurogym_root + task + '/'
+        root = neurogym_root + naming_lambda(task)  + '/'
+        print(f'Data root file: {root}')
         checkpoints, GD_iteration = load_checkpoints(root)
         print(f'{len(checkpoints)} Checkpoints, over {GD_iteration[-1]} GD iterations')
 
@@ -112,9 +117,9 @@ def produce_plots_simple(neurogym_root, output_root, tasks):
         dims = batched_cov_and_pcs(zs_all[:, :, -1:].swapaxes(0,2))[-1][0] # [gd iters]
         dims_all.append(dims)
 
-    dims_all = np.stack(dims_all)
-    np.savetxt('dims_all.csv', dims_all)
-    print(dims_all.shape)
+#    dims_all = np.stack(dims_all)
+#    np.savetxt('dims_all.csv', dims_all)
+#    print(dims_all.shape)
 
     plt.figure(figsize = (10, 6))
     def condense_name(name):
@@ -125,21 +130,20 @@ def produce_plots_simple(neurogym_root, output_root, tasks):
 
     abbr_task_names = [condense_name(name) for name in tasks]
     for idx, (dims, task_name) in enumerate(zip(dims_all, abbr_task_names)):
-        marker = '*' if idx >= 20 else ('x' if idx >= 10 else '^') # 10 distinct colors, so use different marker for every 10
-        plt.scatter(np.arange(len(dims)), dims, label=task_name, marker = marker)
+#        marker = '*' if idx >= 20 else ('x' if idx >= 10 else '^') # 10 distinct colors, so use different marker for every 10
+        plt.plot(np.arange(len(dims)), dims, label=task_name)
 
     plt.legend(frameon=False, ncol=2, fontsize = 12)
-    plt.plot(dims_all.mean(0))
-    plt.yscale('log')
+#    plt.plot(dims_all.mean(0))
     plt.xlabel('GD Iteration, $s$', fontsize = 15)
     plt.ylabel('Estimated Dimension', fontsize = 15)
     plt.title('Dimension of Final Hidden State Over GD')
     plt.tight_layout()
-    plt.savefig('Dimension_all_tasks.pdf')
+    plt.savefig(output_root  + 'Dimension_all_tasks.pdf')
     plt.show()
 
-tasks = 'PerceptualDecisionMaking-v0 OneTwoThreeGo-v0 MultiSensoryIntegration-v0 MotorTiming-v0 IntervalDiscrimination-v0 GoNogo-v0 DelayPairedAssociation-v0 DelayComparison-v0 ContextDecisionMaking-v0'
+#tasks = 'PerceptualDecisionMaking-v0 OneTwoThreeGo-v0 MultiSensoryIntegration-v0 MotorTiming-v0 IntervalDiscrimination-v0 GoNogo-v0 DelayPairedAssociation-v0 DelayComparison-v0 ContextDecisionMaking-v0'
+tasks = 'MotorTiming-v0 AntiReach-v0 DelayComparison-v0 ProbabilisticReasoning-v0 MultiSensoryIntegration-v0 PerceptualDecisionMaking-v0 PerceptualDecisionMakingDelayResponse-v0'
 tasks = tasks.split() # str -> list of str.
-produce_plots_simple('/home/ws3/Desktop/james/neurogym/examples/', 'outputs/', tasks)
-kasoidsa
-produce_plots('/home/ws3/Desktop/james/neurogym/examples/', 'outputs/', tasks) 
+produce_plots('/home/ws3/Desktop/james/neurogym/examples/', 'outputs_run2/', tasks, naming_lambda = lambda task: 'run2_' + task) 
+#produce_plots_simple('/home/ws3/Desktop/james/neurogym/examples/', 'outputs_run2/', tasks, naming_lambda = lambda task: 'run2_' + task)
