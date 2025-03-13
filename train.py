@@ -12,7 +12,7 @@ import copy, argparse
 import json # For saving config file.
 
 from tasks import get_task_wrapper
-from architecture import ModelRNNv3 # My model. In future, might want to make this customizable.
+from architecture import SequentialModel # My model. In future, might want to make this customizable.
 
 def parse_args():
     parser = argparse.ArgumentParser('RNN Training')
@@ -107,7 +107,7 @@ def train(args):
 
     # Setup model. Use a sample input to set the shapes.
     example_batch, example_target = task()
-    model = torch.jit.script(ModelRNNv3(args.n_hidden, example_batch.shape[-1], example_target.shape[-1]))
+    model = torch.jit.script(SequentialModel(args.n_hidden, example_batch.shape[-1], example_target.shape[-1]))
     model.noise_std = args.noise_std
 
     # Scale weights by a percent to play with different initializations.

@@ -8,7 +8,7 @@
 def get_task_wrapper(suite):
     # Given a string, return a wrapper corresponding to that suite of tasks. 
     # E.g., 'neurogym' -> NeuroGymWrapper
-    mapping = {'neurogym': NeuroGymWrapper}
+    mapping = {'neurogym': NeuroGymWrapper, 'laura': LauraTaskWrapper}
     if suite not in list(mapping.keys()):
         raise Exception(f'Suite {suite} does not exist. Valid suites: {list(mapping.keys())}')
     return mapping[suite]
@@ -35,3 +35,29 @@ class NeuroGymWrapper():
         acc = match.float().mean().item()
         acc_respond = match[labels != 0].float().mean().item() # Accuracy when no fixation input.
         return {'acc': acc, 'acc_respond': acc_respond}
+
+class LauraTaskWrapper():
+    def __init__(self, task, batch_size, use_noise = True, **kwargs):
+        import torch
+        if task == 'flip_flop':
+            import flip_flop
+            self.task = flip_flop
+        elif task == 'mix_multi_tasks':
+            import mix_multi_tasks
+            self.task = mix_multi_tasks
+        else:
+            raise Exception("No such task: " + task)
+
+        self.cfg = self.task.DEFAULT_CFG
+        self.cfg.update(kwargs)
+        self.use_noise = use_noise 
+
+        inps, targets = self.task.generate(self.cfg, noise = self.use_noise)
+        self.dataset = torch.utils.data.TensorDataset(inps, targets)
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+
+    def __call__(self):
+        return next(iter(self.dataloader))
+
+    def accuracy(self, out, targets):
+        return self.task.accuracy(out, targets)

@@ -1,19 +1,25 @@
-''' RNN architecture with internal noise and a version that is compatible with my adjoint code. '''
+''' A general sequential model where the activation at each step (could be an ODE stepper) is specified. '''
+''' Handles inserting noise into the model and computing adjoints. '''
 import torch
 from torch import nn
 
-class ModelRNNv3(nn.Module):
-    def __init__(self, n_hidden = 100, n_in = 3, n_out = 3):
+class SequentialModel(nn.Module):
+    def __init__(self, n_hidden = 100, n_in = 3, n_out = 3, activation = 'gru'):
         super().__init__()
         self.n_out, self.n_in = n_out, n_in
         self.n_hidden = n_hidden
 
-        self.W_out = nn.Linear(n_hidden, self.n_out, bias = True)
-        self.W = nn.Linear(n_hidden, n_hidden, bias = False)
-        self.W_in = nn.Linear(n_in, n_hidden, bias = False)
+        self.W_out = nn.Linear(self.n_hidden, self.n_out, bias = True)
+        self.W = nn.Linear(self.n_hidden, self.n_hidden, bias = False) # For a "hook" to get adjoints that correspond to a trained parameter. See paper. 
+        if activation == 'gru':
+            self.f = nn.GRUCell(self.n_in, self.n_hidden) # User can change this.
+        elif activation == 'rnn':
+            self.f = nn.RNNCell(self.n_in, self.n_hidden)
+        else:
+            self.f = activation # User can specify a function directly.
+            
         self.noise_std = 0.
-
-        self.loss_fn_no_reduce = nn.MSELoss(reduction='none') # User can change.
+        self.loss_fn_no_reduce = nn.MSELoss(reduction='none') # Customizable
 
     @torch.jit.export
     def eval_hidden_with_noise(self, X, h0):
@@ -23,7 +29,7 @@ class ModelRNNv3(nn.Module):
 
         hidden = []
         for t in range(X.shape[1]):
-            h_next = self.W(torch.tanh(h)) + self.W_in(X[:, t, :])
+            h_next = self.f(X[:, t, :], self.W(h))
             hidden.append(h_next)
             h = h_next.clone()
             if self.noise_std > 0:
@@ -56,9 +62,12 @@ class ModelRNNv3(nn.Module):
         return hidden, adjoint, output, loss_unreduced, loss
 
     @torch.jit.export
-    def eval_autonomous_simple(self, h):
+    def eval_single_step(self, h, x = torch.Tensor()):
         # h shape [..., H].
-        hout = self.W(torch.tanh(h)) 
+        h_flat = h.reshape(-1, h.shape[-1])
+        if x.numel() == 0:
+            x = torch.zeros((h_flat.shape[0], self.n_in)).to(h_flat.device)
+        hout = self.f(x, self.W(h_flat)).reshape(h.shape)
         return self.W_out(hout), hout
 
 # Turns the forward function of ModelRNNv3 into eval_autonomous_simple, which makes it very fast for FP finding, etc.

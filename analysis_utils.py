@@ -3,7 +3,7 @@ import numpy as np
 import glob, re, os
 import torch
 from tqdm import tqdm
-from architecture import ModelRNNv3
+from architecture import SequentialModel
 
 def load_checkpoints(root):
     # Given a root directdirectoryoy, return a list of filenames corresponding to all checkpoints in that root directory. 
@@ -72,29 +72,38 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbos
         n_hidden = state_dict['W.weight'].shape[0]
 
         with torch.set_grad_enabled(compute_adj):
-            model = torch.jit.script(ModelRNNv3(n_hidden = n_hidden, n_in = n_in, n_out = n_out))
+            model = torch.jit.script(SequentialModel(n_hidden = n_hidden, n_in = n_in, n_out = n_out))
             model.load_state_dict(state_dict)
             model = model.to(device)
 
-            if not compute_adj:
-                zs_all.append(to_np(model(inp)[1]))
-                continue # Done in this case.
+        if not compute_adj:
+            zs_all.append(to_np(model(inp)[1]))
+            continue # Done in this case.
 
-            zs, adj, out, loss_unreduced, loss = model.analysis_mode(inp, targ)
-            zs_all.append(to_np(zs)) # [B, T, H]
-            adjs_all.append(to_np(adj)) # [B, T, H]
-            out_all.append(to_np(out)) # [B, T, n_out]
-            losses_all.append(to_np(loss_unreduced.mean(-1))) # [B, T].
-            grads_all.append({key: to_np(param.grad) for key, param in model.named_parameters()})
+        zs, adj, out, loss_unreduced, loss = model.analysis_mode(inp, targ)
+        zs_all.append(to_np(zs)) # [B, T, H]
+        adjs_all.append(to_np(adj)) # [B, T, H]
+        out_all.append(to_np(out)) # [B, T, n_out]
+        losses_all.append(to_np(loss_unreduced.mean(-1))) # [B, T].
+        grads_all.append({key: to_np(param.grad) for key, param in model.named_parameters()})
 
     if not compute_adj:
         return np.stack(zs_all)
     return np.stack(zs_all), np.stack(adjs_all), np.stack(out_all), np.stack(losses_all), grads_all
 
+
+def effective_rank(A, thresh):
+    S = np.linalg.svd(A, full_matrices=False)[1]
+    variances = S**2
+    total_variance = np.sum(variances)
+
+    # Find the smallest k such that cumsum_variances[k] >= threshold * total_variance
+    return np.searchsorted(np.cumsum(variances), thresh * total_variance) + 1
+
 def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6, normalize = True):
     # Get the covariance and principle components for data over checkpoints (D), batches (B), time (T), with hidden dimension (H). 
-    # traj is shape [D, B, T, H]. D is trials, B is baches (what we mean over), T is time, H is hidden index.
-    # If traj2 is not None, we take cross covariances, assuming traj2 has the same shape.
+    # traj is shape [D, B, T, H1]. D is trials, B is baches (what we mean over), T is time, H1 is hidden index.
+    # If traj2 is not None, we take cross covariances, assuming traj2 has the same shape. Traj2 shape [D, B, T, H2].
     D, B, T, H = traj.shape
     if normalize: # Normalization is useful if the data scale is very small, causing issues with abs_thresh. 
         traj = traj / np.mean(np.abs(traj))
@@ -103,20 +112,24 @@ def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6
 
     covs = []
     if traj2 is None:
+        H2 = traj.shape[-1]
         for zs in traj:
             for z_t in zs.transpose(1,2,0): # Shapes [H, H], [H, B]
                 covs.append(np.cov(z_t))
     else:
+        H2 = traj2.shape[-1]
         centered, centered2 = traj - traj.mean(1)[:, None], traj2 - traj2.mean(1)[:, None]
         for zs, zs2 in zip(centered, centered2):
+            print(zs.shape)
             for z_t, z_t2 in zip(zs.transpose(1,2,0), zs2.transpose(1,2,0)):
-                covs.append(np.dot(z_t, z_t2.T) / (z_t.shape[0] - 1))
+                covs.append(np.dot(z_t, z_t2.T) / (z_t.shape[1] - 1))
 
-    covs = np.stack(covs).reshape((D, T, H, H))
-    evals, pcs = np.linalg.eigh(covs) # Use symmery. Get principle components.
-    evals, pcs = evals[:, :, ::-1], pcs[:, :, :, ::-1] # Make descending order. Shapes [D, T, H], [D, T, H, H]
-    total_variances = np.sum(evals, axis = -1) # [D, T]
-    variance_ratios = np.cumsum(evals / total_variances[..., None], axis = -1)
+    covs = np.stack(covs).reshape((D, T, H, H2))
+
+    pcs, S, _ = np.linalg.svd(covs, full_matrices=False)
+    variances = S**2
+    total_variances = np.sum(variances, axis = -1)
+    variance_ratios = np.cumsum(variances / total_variances[..., None], axis = -1)
     dimensions = np.zeros_like(total_variances)
     for i1 in range(variance_ratios.shape[0]):
         for i2 in range(variance_ratios.shape[1]):
@@ -128,4 +141,4 @@ def batched_cov_and_pcs(traj, traj2 = None, dim_thresh = 0.95, abs_thresh = 1e-6
             dimensions[i1, i2] = dim_idx + (dim_thresh - v0) / (v1 - v0) + 1
 
     dimensions[total_variances < abs_thresh] = 0 # If the total variance is super low, the covariance is a point, so it doesn't make sense to use variance ratios.
-    return covs, evals, pcs, variance_ratios, dimensions
+    return covs, variances, pcs, variance_ratios, dimensions
