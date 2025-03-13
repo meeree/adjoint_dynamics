@@ -40,10 +40,10 @@ class LauraTaskWrapper():
     def __init__(self, task, batch_size, use_noise = True, **kwargs):
         import torch
         if task == 'flip_flop':
-            import flip_flop
+            from laura_tasks import flip_flop
             self.task = flip_flop
         elif task == 'mix_multi_tasks':
-            import mix_multi_tasks
+            from laura_tasks import mix_multi_tasks
             self.task = mix_multi_tasks
         else:
             raise Exception("No such task: " + task)

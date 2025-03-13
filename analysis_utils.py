@@ -38,7 +38,7 @@ def load_sweep_checkpoints(root):
 def import_checkpoint(ch, device = 'cpu'):
     return torch.load(ch, map_location = device, weights_only = True)
 
-def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbose = True):
+def rerun_trials(X, Y, checkpoints, model, compute_adj = False, device = 'cuda', verbose = True):
     # #####################################################################################################
     # Given a list of checkpoints, rerun on the same consistent data and possibly compute adjoints, etc.  |
     # Checkpoints can either be a list of file names or a list of pytorch state_dicts.                    |
@@ -72,7 +72,6 @@ def rerun_trials(X, Y, checkpoints, compute_adj = False, device = 'cuda', verbos
         n_hidden = state_dict['W.weight'].shape[0]
 
         with torch.set_grad_enabled(compute_adj):
-            model = torch.jit.script(SequentialModel(n_hidden = n_hidden, n_in = n_in, n_out = n_out))
             model.load_state_dict(state_dict)
             model = model.to(device)
 

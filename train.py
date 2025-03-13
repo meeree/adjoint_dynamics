@@ -11,14 +11,13 @@ import numpy as np
 import copy, argparse
 import json # For saving config file.
 
-from tasks import get_task_wrapper
 from architecture import SequentialModel # My model. In future, might want to make this customizable.
 
-def parse_args():
+def parse_args(args = None):
     parser = argparse.ArgumentParser('RNN Training')
 
     # Selecting task:
-    parser.add_argument('--task_suite', type=str, default='neurogym')
+    parser.add_argument('--task_suite', type=str, default='laura', choices = ['laura', 'neurogym'])
     parser.add_argument('--task', type=str, default='MotorTiming-v0')
 
     # Training related:
@@ -48,7 +47,10 @@ def parse_args():
     parser.add_argument('--save_freq', type=int, default=200)
     parser.add_argument('--wandb', type=str, default='')
     parser.add_argument('--verbose', type=bool, default=True)
-    return parser.parse_args()
+    return parser.parse_args(args)
+
+def get_default_args():
+    return vars(parse_args([]))
 
 def ping_dir(directory, clear = False):
     # Check if directory exists and make if not. If clear flag is True, clear any contents of the directory if it exists.
@@ -69,13 +71,24 @@ def compute_loss(args, loss_fn, out, target):
         return loss_fn(out[:, -1:, :], target[:, -1:, :])
     return loss_fn(out, target)
 
-def train(args):
-    if isinstance(args, dict):
-        args = argparse.Namespace(**args) # Dict to arguments.
-
+def retrieve_task_from_args(args):
     # Get the task from a suite of them.
+    from tasks import get_task_wrapper
     task_wrapper = get_task_wrapper(args.task_suite)
     task = task_wrapper(**vars(args)) # Pass kwargs.
+    return task
+    
+def train(args, task = None):
+    if isinstance(args, dict):
+        defaults = get_default_args() # For any missing arguments.
+        defaults.update(args)
+        args = argparse.Namespace(**defaults) # Dict to arguments.
+
+    # The user can pass a task (e.g. like in tasks.py) directly. 
+    # Alternatively, they can specify it through args, i.e. keeping task = None:
+    # Sending a task directly without args is more flexible but requires more work.
+    if task is None:
+        task = retrieve_task_from_args(args)
 
     root_dir = args.prefix + '/'
     ping_dir(root_dir)
@@ -204,4 +217,4 @@ def train(args):
 if __name__ == "__main__":
     # For user to run. Can also run training code in other python code, e.g. sweep_ray_tune.py.
     args = parse_args()
-    train(args)
+    train(args) # Task is specified through arguments (task_suite and task).
