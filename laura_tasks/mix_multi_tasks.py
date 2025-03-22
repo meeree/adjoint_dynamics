@@ -8,70 +8,85 @@ DEFAULT_CFG = {
 }
 DEFAULT_CFG.update(memory_pro.DEFAULT_CFG)
 
-def generate(cfg = DEFAULT_CFG, noise = True, debug = False):
-    # Inputs are 5 dimensional: 
-    # [fixation, stim1 cos, stim1 sin, anti, delay].
-    # anti specifies if task is pro or anti (0 or 1), delay specifies if memory or delay task (0 or 1)
-    # 4 durations in order: context, stim, memory, response.
+def generate(cfg=DEFAULT_CFG, noise=True, debug=False):
+    # Inputs are 7 dimensional: 
+    # [fixation, stim1 cos, stim1 sin, task1, task2, task3, task4]
+    # where task1-4 are 1-hot encoding for:
+    # task1: memory-pro, task2: memory-anti, task3: delay-pro, task4: delay-anti
+    
     ctx_end = cfg["T_context"]
     
-    # mem-pro, mem-anti, delay-pro, delay-anti.
-    flags = {'anti': [False, True, False, True], 'delay': [False, False, True, True]}
+    # Order: mem-pro, mem-anti, delay-pro, delay-anti
+    task_flags = {'anti': [False, True, False, True], 
+                 'delay': [False, False, True, True]}
     
     inps, targets = [], []
-    anti_chans, delay_chans = [], []
-    cfg['n_samples'] = cfg['n_samples'] // 4 # Divide up samples between four tasks.
-    for i in range(4):
-        cfg['anti'] = flags['anti'][i]
-        cfg['delay'] = flags['delay'][i]
+    cfg['n_samples'] = cfg['n_samples'] // 4  # Divide up samples between four tasks
+    
+    for task_idx in range(4):
+        cfg['anti'] = task_flags['anti'][task_idx]
+        cfg['delay'] = task_flags['delay'][task_idx]
+        
         inp_i, target_i = memory_pro.generate(cfg, debug=debug, noise=noise)
+        
+        # Create context period with fixation
         ctx_period = torch.zeros((inp_i.shape[0], ctx_end, inp_i.shape[2]))
-        ctx_period[:, :, 0] = 1. # Fixation
+        ctx_period[:, :, 0] = 1.  # Fixation
+        
+        # Combine context and task periods
         inp_i = torch.cat((ctx_period, inp_i), 1)
         target_i = torch.cat((ctx_period, target_i), 1)
-
-        anti_chan_i = torch.zeros_like(inp_i[:, :, 0:1])
-        delay_chan_i = torch.zeros_like(inp_i[:, :, 0:1])
-        anti_chan_i[:, :ctx_end] = int(cfg['anti']) # Anti input.
-        delay_chan_i[:, :ctx_end] = int(cfg['delay']) # Delay input.
-
-        inp_i = torch.cat((inp_i, anti_chan_i, delay_chan_i), -1) # [B, T, 3] -> [B, T, 5]
-
+        
+        # Create 1-hot task encoding channels (4 channels, one per task)
+        batch_size = inp_i.shape[0]
+        time_steps = inp_i.shape[1]
+        
+        # Initialize all task channels to zero
+        task_channels = torch.zeros((batch_size, time_steps, 4))
+        
+        # Set the appropriate task channel to 1 during context period
+        task_channels[:, :ctx_end, task_idx] = 1.0
+        
+        # Concatenate original input with task channels
+        inp_i = torch.cat((inp_i, task_channels), -1)  # [B, T, 3] -> [B, T, 7]
+        
         inps.append(inp_i)
         targets.append(target_i)
-
+    
     inp = torch.cat(inps, 0)
     target = torch.cat(targets, 0)
-
-#    # Shuffling.
-#    inds = torch.randperm(n_samples)
-#    inp, target = inp[inds], target[inds]
-
-    # Add noise to missing parts.
+    
+    # Add noise to missing parts if specified
     if noise:
         with torch.no_grad():
             inp[:, :ctx_end, :3] += torch.normal(torch.zeros_like(inp[:, :ctx_end, :3]), 1.) * .1 * (2 ** .5)
             inp[:, :, 3:] += torch.normal(torch.zeros_like(inp[:, :, 3:]), 1.) * .1 * (2 ** .5)
-
+    
+    # Debug plotting if requested
     if debug:
         import matplotlib.pyplot as plt
-
         for b in range(4):
-            plt.figure()
+            plt.figure(figsize=(12, 10))
+            
+            # Plot stimulus channels
             for chan, name in enumerate(['Fixation', 'Stim1 Cos', 'Stim1 Sin']):
                 for qidx, quant in enumerate([inp, target]):
-                    plt.subplot(4, 2, 1 + 2*chan + qidx)
-                    plt.plot(quant[b, :, chan], linewidth = 4)
+                    plt.subplot(5, 2, 1 + 2*chan + qidx)
+                    plt.plot(quant[b, :, chan], linewidth=4)
                     plt.title(name)
                     plt.ylim(-1.2, 1.2)
-
-            plt.subplot(4, 2, 7)
-            plt.plot(inp[b, :, 3], linewidth = 4)
-            plt.title('Rule')
-            plt.ylim(-1.2, 1.2)
-
+            
+            # Plot task channels
+            task_names = ['Memory-Pro', 'Memory-Anti', 'Delay-Pro', 'Delay-Anti']
+            for i in range(4):
+                plt.subplot(5, 2, 7 + i)
+                plt.plot(inp[b, :, 3 + i], linewidth=4)
+                plt.title(f'Task: {task_names[i]}')
+                plt.ylim(-1.2, 1.2)
+            
             plt.suptitle('Input Left, Target Right')
-
+            plt.tight_layout()
+    
     return inp, target
 
 def accuracy(X, Y):
