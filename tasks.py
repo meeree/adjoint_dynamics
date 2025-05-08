@@ -39,14 +39,18 @@ class NeuroGymWrapper():
 class LauraTaskWrapper():
     def __init__(self, task, batch_size, use_noise = True, **kwargs):
         import torch
+        tasks_avail = ['flip_flop', 'memory_pro', 'mix_multi_tasks']
         if task == 'flip_flop':
             from laura_tasks import flip_flop
             self.task = flip_flop
+        elif task == 'memory_pro':
+            from laura_tasks import memory_pro
+            self.task = memory_pro 
         elif task == 'mix_multi_tasks':
             from laura_tasks import mix_multi_tasks
             self.task = mix_multi_tasks
         else:
-            raise Exception("No such task: " + task)
+            raise Exception(f"No such task: {task}, available tasks: {tasks_avail}")
 
         self.cfg = self.task.DEFAULT_CFG
         self.cfg.update(kwargs)

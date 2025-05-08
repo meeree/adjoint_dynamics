@@ -54,7 +54,13 @@ def generate(cfg=DEFAULT_CFG, noise=True, debug=False):
         targets.append(target_i)
     
     inp = torch.cat(inps, 0)
-    target = torch.cat(targets, 0)
+
+    targets_stacked = [torch.zeros((targ.shape[0], targ.shape[1], 12)) for targ in targets]
+    for i, (targ_stack, targ) in enumerate(zip(targets_stacked, targets)):
+        targ_stack[:, :, i * 3 : (i+1) * 3] = targ
+
+    target = torch.cat(targets_stacked, 0) # [4 * B, T, 3]
+    print(target.shape)
     
     # Add noise to missing parts if specified
     if noise:
