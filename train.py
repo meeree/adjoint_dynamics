@@ -17,7 +17,7 @@ def parse_args(args = None):
     parser = argparse.ArgumentParser('RNN Training')
 
     # Selecting task:
-    parser.add_argument('--task_suite', type=str, default='laura', choices = ['laura', 'neurogym'])
+    parser.add_argument('--task_suite', type=str, default='custom', choices = ['custom', 'neurogym'])
     parser.add_argument('--task', type=str, default='MotorTiming-v0')
 
     # Training related:

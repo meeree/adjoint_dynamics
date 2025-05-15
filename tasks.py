@@ -8,7 +8,7 @@
 def get_task_wrapper(suite):
     # Given a string, return a wrapper corresponding to that suite of tasks. 
     # E.g., 'neurogym' -> NeuroGymWrapper
-    mapping = {'neurogym': NeuroGymWrapper, 'laura': LauraTaskWrapper}
+    mapping = {'neurogym': NeuroGymWrapper, 'custom': CustomTaskWrapper}
     if suite not in list(mapping.keys()):
         raise Exception(f'Suite {suite} does not exist. Valid suites: {list(mapping.keys())}')
     return mapping[suite]
@@ -36,18 +36,18 @@ class NeuroGymWrapper():
         acc_respond = match[labels != 0].float().mean().item() # Accuracy when no fixation input.
         return {'acc': acc, 'acc_respond': acc_respond}
 
-class LauraTaskWrapper():
-    def __init__(self, task, batch_size, use_noise = True, **kwargs):
+class CustomTaskWrapper():
+    def __init__(self, task, batch_size, use_noise = True, shuffle = True, **kwargs):
         import torch
         tasks_avail = ['flip_flop', 'memory_pro', 'mix_multi_tasks']
         if task == 'flip_flop':
-            from laura_tasks import flip_flop
+            from custom_tasks import flip_flop
             self.task = flip_flop
         elif task == 'memory_pro':
-            from laura_tasks import memory_pro
+            from custom_tasks import memory_pro
             self.task = memory_pro 
         elif task == 'mix_multi_tasks':
-            from laura_tasks import mix_multi_tasks
+            from custom_tasks import mix_multi_tasks
             self.task = mix_multi_tasks
         else:
             raise Exception(f"No such task: {task}, available tasks: {tasks_avail}")
@@ -58,7 +58,7 @@ class LauraTaskWrapper():
 
         inps, targets = self.task.generate(self.cfg, noise = self.use_noise)
         self.dataset = torch.utils.data.TensorDataset(inps, targets)
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, shuffle=True)
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, shuffle=shuffle)
 
     def __call__(self):
         return next(iter(self.dataloader))
